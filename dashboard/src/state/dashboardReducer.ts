@@ -27,6 +27,12 @@ export interface DashboardState {
   diffRevision: number
   iteration: number
   status: RunStatus
+  /** Which failing test the agent is currently working, for a repo-wide
+   * (multi-issue) run. Null for a single-issue run/demo that never emits
+   * issue_start — the UI hides the tracker entirely in that case. */
+  currentIssue: { id: string; remaining: number } | null
+  fixedIssues: string[]
+  unresolvedIssues: string[]
 }
 
 const idleStages: Record<PipelineNodeId, NodeVisualStatus> = {
@@ -46,6 +52,9 @@ export const initialDashboardState: DashboardState = {
   diffRevision: 0,
   iteration: 0,
   status: 'failing',
+  currentIssue: null,
+  fixedIssues: [],
+  unresolvedIssues: [],
 }
 
 let logIdCounter = 0
@@ -140,6 +149,23 @@ export function dashboardReducer(state: DashboardState, event: DashboardAction):
           event.value === 'fixed' || event.value === 'unresolved'
             ? { ...state.nodeStatus, loop: 'done' }
             : state.nodeStatus,
+      }
+
+    case 'issue_start':
+      return {
+        ...state,
+        currentIssue: { id: event.issue, remaining: event.remaining },
+      }
+
+    case 'issue_end':
+      return {
+        ...state,
+        fixedIssues:
+          event.status === 'fixed' ? [...state.fixedIssues, event.issue] : state.fixedIssues,
+        unresolvedIssues:
+          event.status === 'unresolved'
+            ? [...state.unresolvedIssues, event.issue]
+            : state.unresolvedIssues,
       }
 
     default:
