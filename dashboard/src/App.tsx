@@ -3,6 +3,7 @@ import { motion } from 'framer-motion'
 import { useEffect, useRef } from 'react'
 import { DiffViewer } from '@/components/DiffViewer'
 import { Header } from '@/components/Header'
+import { IssueTracker } from '@/components/IssueTracker'
 import { IterationCounter } from '@/components/IterationCounter'
 import { PipelineFlow } from '@/components/pipeline/PipelineFlow'
 import { LogPanel } from '@/components/LogPanel'
@@ -49,6 +50,12 @@ function App() {
           <StatusBadge status={state.status} />
         </div>
       </div>
+
+      <IssueTracker
+        currentIssue={state.currentIssue}
+        fixedCount={state.fixedIssues.length}
+        unresolvedCount={state.unresolvedIssues.length}
+      />
 
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 px-6 pb-4 lg:grid-cols-[3fr_2fr]">
         <Card className="min-h-0 overflow-hidden">
