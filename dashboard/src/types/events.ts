@@ -32,6 +32,20 @@ export interface StatusEvent {
   value: RunStatus
 }
 
+/** A repo-wide run works one failing test at a time; these two events
+ * bracket the fix loop for a single issue so multi-issue runs (see
+ * greenlit/orchestrator.py's outer loop) are distinguishable from a
+ * single-issue run's own retries. */
+export interface IssueStartEvent {
+  issue: string
+  remaining: number
+}
+
+export interface IssueEndEvent {
+  issue: string
+  status: 'fixed' | 'unresolved'
+}
+
 export interface GreenlitEventMap {
   stage_start: StageStartEvent
   stage_end: StageEndEvent
@@ -39,6 +53,8 @@ export interface GreenlitEventMap {
   diff_ready: DiffReadyEvent
   iteration: IterationEvent
   status: StatusEvent
+  issue_start: IssueStartEvent
+  issue_end: IssueEndEvent
 }
 
 export type GreenlitEventType = keyof GreenlitEventMap
@@ -54,4 +70,6 @@ export const EVENT_TYPES: GreenlitEventType[] = [
   'diff_ready',
   'iteration',
   'status',
+  'issue_start',
+  'issue_end',
 ]
