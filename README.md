@@ -52,6 +52,28 @@ This resolves live PLAN/EVALUATE model IDs, makes one chat completion call
 to each tier, and runs one command inside a Sandbox — printing what it did
 at each step.
 
+## Run it against a repo
+
+```bash
+python scripts/run_repo.py [repo_dir] [--install "..."] [--test "pytest -q"]
+```
+
+Discovers every currently-failing test in `repo_dir` (default:
+`demo/fixture_simple`), then fixes them one at a time: PERCEIVE the
+failure → PLAN a diff (Nemotron Ultra) → optionally RESEARCH an unfamiliar
+API (Tavily) → ACT by testing the diff in a Sandbox → EVALUATE the result
+(Nemotron Nano) → retry with attempt history, or move to the next issue.
+Re-runs the whole suite after each accepted fix rather than working off a
+stale failure list, so a fix that incidentally repairs or breaks another
+test is caught on the next pass. See
+[greenlit/orchestrator.py](greenlit/orchestrator.py).
+
+Control-flow correctness (worklist discovery, per-issue retry, the
+give-up-and-move-on path, the research re-plan branch) is verified without
+needing live credentials in `scripts/test_orchestrator.py` — it fakes the
+LLM/sandbox calls but exercises real diff application and real traceback
+parsing against the fixtures in `demo/`.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
