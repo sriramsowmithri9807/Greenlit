@@ -1,79 +1,112 @@
 # Greenlit
 
-Autonomous test-fix-verify agent. The moment a test suite goes red, Greenlit
-diagnoses the failure, writes a fix, verifies it by re-running the tests
-inside an isolated sandbox, and iterates until the suite passes — or reports
-exactly what it tried and why it's stuck. No PR, no GitHub/GitLab
-integration, no human in the loop until it's done.
+Paste a GitHub repo URL. Greenlit finds the bugs, files each one as a GitHub
+issue, writes a fix for each, proves every fix by running the repo's tests in
+an isolated sandbox, and opens a pull request that closes the issues it fixed.
 
 Built for the Nebius x NVIDIA Global AI Hackathon (Coding & Agentic
 Engineering track).
 
-> Status: early scaffold. This README covers setup for build-order step 1
-> (confirming stack access). The full judging-oriented writeup — model
-> tiering rationale, sandbox usage, conditional Tavily usage mapped to the
-> judging criteria — lands in week 4.
+```
+repo URL ─► clone ─► scan ─────────────► raise issues ─► fix each issue ───────────────► commit + PR
+                     ├ test suite            (GitHub)    PERCEIVE → PLAN → [RESEARCH]
+                     │ (Nebius sandbox)                  → ACT → EVALUATE → retry
+                     └ code review
+                       (Nemotron 3 Ultra)
+```
 
-## Required stack
+## What makes a fix "verified"
 
-- **Nebius Token Factory** — OpenAI-compatible inference API
-  (`https://api.tokenfactory.nebius.com/v1/`) serving open NVIDIA **Nemotron**
-  models, tiered by cost/latency:
-  - **PLAN** (root-cause reasoning + patch proposal): Nemotron Ultra
-  - **EVALUATE** (parse test output, classify pass/fail/retry): Nemotron Nano/Super
-  - Model IDs are *resolved live* against `GET /v1/models`
-    ([greenlit/clients/nebius.py](greenlit/clients/nebius.py)) rather than
-    hardcoded — see that file's docstring for why.
-- **Nebius Token Factory Sandboxes** (SDK package `contree-sdk`, branded
-  ConTree) — every target-repo test run happens inside an isolated
-  sandbox/microVM, never on the host. See
-  [greenlit/clients/sandbox.py](greenlit/clients/sandbox.py).
-- **Tavily** — called conditionally, only when the PLAN step flags the
-  failure as involving an unfamiliar/version-sensitive external library.
+A proposed diff is applied to a throwaway copy and run in a Nebius Token
+Factory sandbox. It's only committed if:
 
-## Setup
+- it applies cleanly and only touches paths inside the repo,
+- it doesn't edit test files: Greenlit fixes the code under test, and never
+  weakens a test to make it pass,
+- for a failing-test issue, that test now passes, **and** the full suite has no
+  failure that wasn't there before,
+- for a code-review issue, it edits the reported file, compiles, and the full
+  suite has no new failures.
+
+A diff that fails any check goes back to the planner as a failed attempt, with
+the reason, so the next attempt is different. After the retry budget, the
+issue gets a comment explaining what was tried.
+
+## Required stack, and where each piece is used
+
+| Requirement | Where |
+|---|---|
+| **NVIDIA Nemotron via Nebius Token Factory**, tiered by cost | [greenlit/llm_client.py](greenlit/llm_client.py) |
+| Nemotron 3 Ultra (`nvidia/Nemotron-3-Ultra-550b-a55b`) for the expensive reasoning: code review and fix planning | `call_reviewer`, `call_planner` |
+| Nemotron 3 Nano (`nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B`) for the cheap, frequent call: classifying each sandbox test run | `call_evaluator` |
+| Structured output via forced tool calling on both models (no free-text parsing) | same file |
+| **Token Factory Sandboxes**: every run of the target repo's code happens in a sandbox, never on the host | [greenlit/clients/sandbox.py](greenlit/clients/sandbox.py) |
+| **Tavily**, called only when the planner flags an unfamiliar or version-sensitive API, then planning re-runs with the docs | [greenlit/research.py](greenlit/research.py), `FixEngine._plan` |
+
+## Running it
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # fill in NEBIUS_API_KEY and NEBIUS_AI_PROJECT
+cp .env.example .env              # NEBIUS_API_KEY, NEBIUS_AI_PROJECT (+ TAVILY_API_KEY, optional)
+python scripts/verify_stack.py    # checks model IDs, tool calling, sandbox, sandbox network
+
+cd dashboard && npm install && npm run build && cd ..
+python -m greenlit.server         # open http://127.0.0.1:8000
 ```
 
-## Step 1: verify stack access
+In the UI, paste a repo URL:
 
-Before any orchestration logic is built, prove the three required-stack
-calls actually work:
+- **URL only**: a read-only dry run. Issues are found and fixes verified, and
+  the combined diff is shown. Nothing is written to GitHub.
+- **URL + token**: the full run. Issues are raised on the repo, each fix is
+  pushed as its own commit to a new `greenlit/fix-*` branch, and a pull request
+  is opened. Nothing is ever pushed to the default branch. Use a
+  [fine-grained token](https://github.com/settings/personal-access-tokens/new)
+  for that repo with Contents, Issues and Pull requests set to Read and write.
+
+CLI equivalent:
+`python scripts/run_repo.py https://github.com/owner/repo [--live]`. It also
+takes a local folder, for example `python scripts/run_repo.py demo/fixture_multi`.
+
+**Demo without credentials:** run the dashboard with `npm run dev` and open
+`http://localhost:5173/?mock=1` (or `?mock=partial`). This plays a scripted run
+and is labelled as such in the UI.
+
+Supported: Python repos tested with pytest.
+
+## Safety
+
+- The user's token is used for the run only and never written to disk. Git
+  receives it as a per-command auth header, not in the remote URL or
+  `.git/config`, and it's scrubbed from every error message. Git runs with the
+  host's global config and credential helpers disabled, so a rejected token
+  can't fall back to credentials stored on the server.
+- Repo hooks are disabled for every git command, since the clone is untrusted.
+- Model-written diffs are path-checked: absolute paths, `..`, `.git/` and
+  symlink escapes are all refused.
+- The web API only accepts github.com repos, never local paths.
+
+## Tests
 
 ```bash
-python scripts/verify_stack.py
+python -m pytest
 ```
 
-This resolves live PLAN/EVALUATE model IDs, makes one chat completion call
-to each tier, and runs one command inside a Sandbox — printing what it did
-at each step.
+76 tests. The engine and agent tests run real pytest (on Greenlit's own demo
+fixtures), apply real diffs, and push real commits into a local bare git repo
+that stands in for GitHub. Only the Nemotron calls and GitHub's REST API are
+scripted. `demo/` holds the deliberately broken fixtures and is excluded from
+collection.
 
-## Run it against a repo
+## Status
 
-```bash
-python scripts/run_repo.py [repo_dir] [--install "..."] [--test "pytest -q"]
-```
-
-Discovers every currently-failing test in `repo_dir` (default:
-`demo/fixture_simple`), then fixes them one at a time: PERCEIVE the
-failure → PLAN a diff (Nemotron Ultra) → optionally RESEARCH an unfamiliar
-API (Tavily) → ACT by testing the diff in a Sandbox → EVALUATE the result
-(Nemotron Nano) → retry with attempt history, or move to the next issue.
-Re-runs the whole suite after each accepted fix rather than working off a
-stale failure list, so a fix that incidentally repairs or breaks another
-test is caught on the next pass. See
-[greenlit/orchestrator.py](greenlit/orchestrator.py).
-
-Control-flow correctness (worklist discovery, per-issue retry, the
-give-up-and-move-on path, the research re-plan branch) is verified without
-needing live credentials in `scripts/test_orchestrator.py` — it fakes the
-LLM/sandbox calls but exercises real diff application and real traceback
-parsing against the fixtures in `demo/`.
+Everything above is tested offline. It has **not** yet been run against live
+Nemotron models or a live Nebius sandbox: `scripts/verify_stack.py` is the
+first thing to run once credentials are available. The open questions it
+answers are whether the model IDs above exist in the account's catalog and
+whether the sandbox has network access for `pip install`.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
