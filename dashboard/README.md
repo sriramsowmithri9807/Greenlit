@@ -1,39 +1,31 @@
-# Greenlit Dashboard
+# Greenlit dashboard
 
-The live orchestration UI (build-order step 5). Single page: an animated
-React Flow pipeline (Perceive → Plan → Research → Act → Evaluate → Loop),
-a syntax-highlighted diff viewer, an auto-scrolling log panel, an iteration
-counter, and a status badge.
+The web UI: a start screen (repo URL + optional token), then a live view of
+the run: phase stepper, issues as they're raised and fixed, the per-issue
+PERCEIVE → PLAN → RESEARCH → ACT → EVALUATE → LOOP pipeline, the current
+diff, the log, and the resulting pull request.
 
-## Run
+## Development
 
 ```bash
 npm install
-npm run dev
+npm run dev          # http://localhost:5173, proxies /api to the backend on :8000
 ```
 
-Opens at `http://localhost:5173/`.
+Run the backend alongside it with `python -m greenlit.server` from the repo
+root. For production, `npm run build` and the backend serves `dist/` itself at
+http://127.0.0.1:8000.
 
-## Mock mode vs live backend
+## Demo mode
 
-By default (`VITE_SSE_URL` unset) the page drives itself off a local mock
-event replayer — two dev-only buttons top-right ("Success run" /
-"Unresolved run") fire a full scripted event sequence on a timer. This is
-how the UI was built and polished before any backend existed.
-
-To point at the real backend once it's ready, set one env var:
-
-```bash
-echo "VITE_SSE_URL=http://localhost:8000/events" > .env.local
-```
-
-`useGreenlitStream` ([src/hooks/useGreenlitStream.ts](src/hooks/useGreenlitStream.ts))
-switches to a real `EventSource` automatically when this is set, and the
-mock replay buttons stop rendering (`ScenarioControls` is mock-only, see
-its docstring). No other code changes needed.
+`http://localhost:5173/?mock=1` replays a scripted run, and `?mock=partial`
+replays one where an issue can't be fixed. No backend or credentials are
+needed. The UI labels it as a scripted demo. Leave the token empty to see the
+dry-run flavour, or fill anything in for the live flavour.
 
 ## Event contract
 
-The backend must emit these six named SSE events (see
-[src/types/events.ts](src/types/events.ts) for the exact payload shapes):
-`stage_start`, `stage_end`, `log_line`, `diff_ready`, `iteration`, `status`.
+[src/types/events.ts](src/types/events.ts) mirrors the events emitted by
+`greenlit/agent.py` and `greenlit/orchestrator.py`, delivered over SSE from
+`GET /api/runs/{id}/events`. The stream resumes via `Last-Event-ID` and ends
+with an `end` event.
