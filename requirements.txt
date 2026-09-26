@@ -3,4 +3,7 @@ contree-sdk
 contree-client[httpx]
 python-dotenv
 tavily-python
+httpx
+fastapi
+uvicorn
 pytest
