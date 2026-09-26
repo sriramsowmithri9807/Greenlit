@@ -116,21 +116,25 @@ _PLAN_TOOL = {
 }
 
 _PLAN_SYSTEM_PROMPT = (
-    "You are the PLAN step of an autonomous test-fix-verify agent. Given a failing "
-    "test's stack trace and the relevant source code, reason about the root cause "
-    "first, then propose the SMALLEST diff that could plausibly fix it. If "
-    "prior_attempts is present, never repeat a diff already listed there — each "
-    "entry records why that attempt failed, so take a genuinely different approach. "
-    "If research_context is present, it is real documentation pulled to answer a "
-    "prior unfamiliar_api flag; use it to inform this attempt. Always respond by "
-    "calling the propose_fix tool."
+    "You are the PLAN step of an autonomous bug-fixing agent. You get either a "
+    "failing test (stack_trace) or a reported bug (issue: title, location, "
+    "description), plus the relevant source files. Reason about the root cause "
+    "first, then propose the SMALLEST diff that fixes it. Fix the code under test, "
+    "never weaken or delete a test to make it pass. The diff must be a unified diff "
+    "whose paths are relative to the repository root with a/ and b/ prefixes "
+    "(--- a/pkg/mod.py, +++ b/pkg/mod.py), with exact context lines copied from the "
+    "source provided. If prior_attempts is present, never repeat a diff already "
+    "listed there — each entry records why that attempt failed, so take a genuinely "
+    "different approach. If research_context is present, it is real documentation "
+    "pulled to answer a prior unfamiliar_api flag; use it to inform this attempt. "
+    "Always respond by calling the propose_fix tool."
 )
 
 
 def call_planner(error_context: dict) -> dict:
-    """error_context keys: stack_trace, source_files (dict path -> content),
-    prior_attempts (optional list of {diff, why_it_failed}),
-    research_context (optional str, Tavily doc summary)."""
+    """error_context keys: stack_trace (test issues) or issue (review issues),
+    source_files (dict path -> content), prior_attempts (optional list of
+    {diff, why_it_failed}), research_context (optional str, Tavily summary)."""
     client = get_client()
     response = _create_with_retry(
         client,
@@ -211,3 +215,78 @@ def call_evaluator(
         tool_choice={"type": "function", "function": {"name": "classify_result"}},
     )
     return _extract_tool_call_args(response, "classify_result")
+
+
+# --- REVIEW --------------------------------------------------------------
+
+_REVIEW_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "report_bugs",
+        "description": "Report concrete bugs found in the source files. Empty list if none.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "bugs": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string", "description": "Short issue title, under 80 chars."},
+                            "file": {"type": "string", "description": "Repo-relative path, exactly as given."},
+                            "line": {"type": "integer", "description": "1-based line number of the bug."},
+                            "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+                            "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                            "description": {
+                                "type": "string",
+                                "description": "What goes wrong, for which input, and what should happen instead.",
+                            },
+                            "evidence": {
+                                "type": "string",
+                                "description": "The offending line(s), copied verbatim from the source.",
+                            },
+                        },
+                        "required": ["title", "file", "line", "severity", "confidence", "description", "evidence"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["bugs"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+_REVIEW_SYSTEM_PROMPT = (
+    "You are the code-review step of an autonomous bug-fixing agent. Each finding "
+    "you report is filed as a GitHub issue on the owner's repository, so a false "
+    "positive costs them time: report only concrete defects you can demonstrate from "
+    "the code shown — wrong results, crashes, off-by-one errors, unhandled edge cases "
+    "that the code's own intent clearly covers, resource leaks, security bugs. Do NOT "
+    "report style, naming, missing docs or type hints, performance nitpicks, or "
+    "speculative problems that depend on code you cannot see. Source lines are "
+    "prefixed with their line numbers; cite those. known_failures lists problems "
+    "already found by failing tests; do not report those again. Returning no bugs is "
+    "a good answer for correct code. Always respond by calling the report_bugs tool."
+)
+
+
+def call_reviewer(source_files: dict[str, str], known_failures: list[str]) -> list[dict]:
+    """source_files: repo-relative path -> line-numbered content."""
+    client = get_client()
+    response = _create_with_retry(
+        client,
+        model=PLAN_MODEL,
+        messages=[
+            {"role": "system", "content": _REVIEW_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {"source_files": source_files, "known_failures": known_failures}, indent=2
+                ),
+            },
+        ],
+        tools=[_REVIEW_TOOL],
+        tool_choice={"type": "function", "function": {"name": "report_bugs"}},
+    )
+    return _extract_tool_call_args(response, "report_bugs").get("bugs", [])
