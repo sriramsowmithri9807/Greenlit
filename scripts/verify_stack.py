@@ -1,10 +1,16 @@
-"""Build-order step 1: prove the required stack is reachable before writing
-any orchestration logic. Makes one raw call to the PLAN-tier model, one to
-the EVALUATE-tier model, and one sandbox code-execution call.
+"""First thing to run once credentials exist: checks every live dependency
+the agent assumes, one at a time, and says exactly which one is broken.
+
+    1. The Nemotron model IDs hardcoded in greenlit/llm_client.py exist in
+       this account's Token Factory catalog.
+    2. Forced tool calling returns structured output on both models (the
+       agent never parses free text, so this has to work).
+    3. The Sandbox runs a Python image.
+    4. The Sandbox can reach PyPI (`pip install pytest`). Every repo run
+       depends on this; if it fails, the sandbox has no network.
 
 Usage:
     cp .env.example .env   # fill in NEBIUS_API_KEY, NEBIUS_AI_PROJECT
-    pip install -r requirements.txt
     python scripts/verify_stack.py
 """
 from __future__ import annotations
@@ -14,44 +20,60 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from greenlit.clients.nebius import NebiusClient
 from greenlit.clients.sandbox import Sandbox
 from greenlit.config import GreenlitConfig
+from greenlit.llm_client import EVAL_MODEL, PLAN_MODEL, call_evaluator, get_client
+
+
+def step(title: str) -> None:
+    print(f"\n== {title}")
 
 
 def main() -> int:
     config = GreenlitConfig.from_env()
-    nebius = NebiusClient(config)
+    failures: list[str] = []
 
-    print("== Resolving live Nemotron model IDs from GET /v1/models ==")
-    plan_model = nebius.resolve_model(*config.plan_model_keywords)
-    eval_model = nebius.resolve_model(*config.eval_model_keywords)
-    print(f"PLAN model (expensive reasoning): {plan_model}")
-    print(f"EVALUATE model (fast/cheap):       {eval_model}")
+    step("1. Model IDs exist in the Token Factory catalog")
+    available = {m.id for m in get_client().models.list().data}
+    for model in (PLAN_MODEL, EVAL_MODEL):
+        if model in available:
+            print(f"  ok       {model}")
+        else:
+            failures.append(f"model {model} not in catalog")
+            print(f"  MISSING  {model}")
+    if failures:
+        nemotron = sorted(m for m in available if "nemotron" in m.lower())
+        print("  Nemotron models this account can see:", *nemotron or ["(none)"], sep="\n    ")
 
-    print("\n== Calling PLAN-tier model ==")
-    plan_resp = nebius.chat(
-        plan_model,
-        [{"role": "user", "content": "Reply with exactly: PLAN_OK"}],
-        max_tokens=16,
-    )
-    print(plan_resp.choices[0].message.content)
+    step("2. Forced tool calling (EVALUATE on Nemotron Nano)")
+    try:
+        verdict = call_evaluator(test_stdout="1 passed", test_stderr="", exit_code=0, prior_error=None)
+        print(f"  ok       {verdict}")
+    except Exception as exc:  # noqa: BLE001 - diagnostic script, report and continue
+        failures.append(f"tool calling on {EVAL_MODEL}: {exc}")
+        print(f"  FAILED   {exc}")
 
-    print("\n== Calling EVALUATE-tier model ==")
-    eval_resp = nebius.chat(
-        eval_model,
-        [{"role": "user", "content": "Reply with exactly: EVAL_OK"}],
-        max_tokens=16,
-    )
-    print(eval_resp.choices[0].message.content)
-
-    print("\n== Calling Sandbox ==")
     sandbox = Sandbox(config)
-    result = sandbox.run_shell("echo SANDBOX_OK")
-    print(f"stdout={result.stdout!r} exit_code={result.exit_code}")
-    sandbox.close()
+    try:
+        step("3. Sandbox runs Python")
+        result = sandbox.run_shell("python --version")
+        print(f"  exit={result.exit_code} {result.stdout.strip() or result.stderr.strip()}")
+        if result.exit_code != 0:
+            failures.append("sandbox can't run python")
 
-    print("\nAll three required-stack calls succeeded.")
+        step("4. Sandbox can install from PyPI")
+        result = sandbox.run_shell("pip install -q pytest && python -m pytest --version")
+        print(f"  exit={result.exit_code} {(result.stdout + result.stderr).strip()[-300:]}")
+        if result.exit_code != 0:
+            failures.append("sandbox can't pip install (no network?)")
+    finally:
+        sandbox.close()
+
+    print()
+    if failures:
+        print("FAILED:", *failures, sep="\n  - ")
+        return 1
+    print("Every live dependency checks out. Try: python scripts/run_repo.py demo/fixture_multi")
     return 0
 
 
