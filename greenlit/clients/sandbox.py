@@ -17,6 +17,7 @@ from contree_client.sync import ContreeClient
 from contree_sdk import ContreeSync
 
 from greenlit.config import GreenlitConfig
+from greenlit.repo_files import iter_repo_files
 
 DEFAULT_BASE_IMAGE = "python:3.11-slim"
 
@@ -51,8 +52,7 @@ class Sandbox:
         touched or executed on the host."""
         files = {
             f"/work/{path.relative_to(repo_dir).as_posix()}": path
-            for path in repo_dir.rglob("*")
-            if path.is_file()
+            for path in iter_repo_files(repo_dir)
         }
         image = self._sdk.images.use(self._base_image)
         staged = image.apply_files(files=files)
