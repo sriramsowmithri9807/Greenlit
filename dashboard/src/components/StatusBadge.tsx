@@ -2,38 +2,41 @@ import { motion } from 'framer-motion'
 import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion'
 import type { RunStatus } from '@/types/events'
 
-const STATUS_CONFIG: Record<
-  RunStatus,
-  { label: string; bg: string; fg: string; border: string; pulsing: boolean }
-> = {
-  failing: {
-    label: 'Failing',
-    bg: 'color-mix(in oklab, var(--color-fail) 16%, transparent)',
-    fg: 'var(--color-fail)',
-    border: 'var(--color-fail)',
-    pulsing: false,
-  },
-  testing: {
-    label: 'Testing',
+type Tone = { bg: string; fg: string; border: string }
+
+const TONES: Record<'neutral' | 'amber' | 'pass' | 'fail' | 'done', Tone> = {
+  neutral: { bg: 'var(--color-surface-raised)', fg: 'var(--color-fg-muted)', border: 'var(--color-border)' },
+  amber: {
     bg: 'color-mix(in oklab, var(--color-amber) 14%, transparent)',
     fg: 'var(--color-amber)',
     border: 'var(--color-amber)',
-    pulsing: true,
   },
-  fixed: {
-    label: 'Fixed',
+  done: {
+    bg: 'color-mix(in oklab, var(--color-done) 14%, transparent)',
+    fg: 'var(--color-done)',
+    border: 'var(--color-done)',
+  },
+  pass: {
     bg: 'color-mix(in oklab, var(--color-pass) 18%, transparent)',
     fg: 'var(--color-pass)',
     border: 'var(--color-pass)',
-    pulsing: false,
   },
-  unresolved: {
-    label: 'Unresolved',
-    bg: 'var(--color-surface-raised)',
-    fg: 'var(--color-fg-muted)',
-    border: 'var(--color-border)',
-    pulsing: false,
+  fail: {
+    bg: 'color-mix(in oklab, var(--color-fail) 16%, transparent)',
+    fg: 'var(--color-fail)',
+    border: 'var(--color-fail)',
   },
+}
+
+const STATUS_CONFIG: Record<RunStatus, Tone & { label: string; pulsing: boolean }> = {
+  idle: { label: 'Ready', ...TONES.neutral, pulsing: false },
+  scanning: { label: 'Scanning', ...TONES.done, pulsing: true },
+  testing: { label: 'Fixing', ...TONES.amber, pulsing: true },
+  clean: { label: 'Clean', ...TONES.pass, pulsing: false },
+  fixed: { label: 'All fixed', ...TONES.pass, pulsing: false },
+  partial: { label: 'Partly fixed', ...TONES.amber, pulsing: false },
+  unresolved: { label: 'Not fixed', ...TONES.neutral, pulsing: false },
+  error: { label: 'Error', ...TONES.fail, pulsing: false },
 }
 
 export function StatusBadge({ status }: { status: RunStatus }) {
