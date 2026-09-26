@@ -1,70 +1,72 @@
-"""CLI entry point: point Greenlit at any repo and fix every failing test.
+"""CLI: run the Greenlit agent against a GitHub repo or a local folder.
 
-Runs the repo-wide agent (greenlit.orchestrator.run): discovers every
-currently-failing test, fixes them one at a time via Nemotron, verifying
-each fix inside a Sandbox before moving to the next issue.
+    python scripts/run_repo.py https://github.com/owner/repo            # dry run
+    GITHUB_TOKEN=... python scripts/run_repo.py https://github.com/owner/repo --live
+    python scripts/run_repo.py demo/fixture_multi                       # local folder, dry run
 
-Usage:
-    export NEBIUS_API_KEY=...
-    export NEBIUS_AI_PROJECT=...
-    python scripts/run_repo.py [repo_dir] [--install "pip install -q -r requirements.txt"] [--test "pytest -q"]
+A dry run finds issues and verifies fixes in the sandbox but writes nothing
+to GitHub. --live (needs GITHUB_TOKEN) raises the issues, pushes fixes to a
+new greenlit/fix-* branch and opens a pull request.
 
-With no repo_dir, defaults to demo/fixture_simple.
+Needs NEBIUS_API_KEY and NEBIUS_AI_PROJECT (e.g. in .env).
 """
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from greenlit.orchestrator import DEFAULT_MAX_ISSUES, DEFAULT_MAX_ITERATIONS_PER_ISSUE, run
-
-DEFAULT_FIXTURE = Path(__file__).resolve().parent.parent / "demo" / "fixture_simple"
+from greenlit.agent import DEFAULT_MAX_ISSUES, run_agent
+from greenlit.orchestrator import DEFAULT_MAX_ITERATIONS
 
 
 def emit(event_type: str, payload: dict) -> None:
-    print(f"[{event_type}] {payload}")
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "repo_dir",
-        nargs="?",
-        type=Path,
-        default=DEFAULT_FIXTURE,
-        help="Path to the repo to fix (default: demo/fixture_simple)",
-    )
-    parser.add_argument(
-        "--install",
-        default=None,
-        help='Setup command to run before each test invocation, e.g. "pip install -q -r requirements.txt"',
-    )
-    parser.add_argument("--test", default="pytest -q", help='Base test command (default: "pytest -q")')
-    parser.add_argument("--max-issues", type=int, default=DEFAULT_MAX_ISSUES)
-    parser.add_argument("--max-iterations", type=int, default=DEFAULT_MAX_ITERATIONS_PER_ISSUE)
-    return parser.parse_args()
+    if event_type == "log_line":
+        print(f"  {payload['text']}")
+    elif event_type == "diff_ready":
+        print("  ┌ diff")
+        for line in payload["diff"].splitlines():
+            print(f"  │ {line}")
+        print("  └")
+    elif event_type in ("stage_start", "stage_end", "iteration"):
+        return
+    else:
+        print(f"[{event_type}] {payload}")
 
 
 def main() -> int:
-    args = parse_args()
-    result = run(
-        args.repo_dir.resolve(),
-        install_command=args.install,
-        test_command=args.test,
-        max_issues=args.max_issues,
-        max_iterations_per_issue=args.max_iterations,
-        emit=emit,
-    )
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("repo", help="GitHub repo URL, owner/repo, or a local folder")
+    parser.add_argument("--live", action="store_true", help="Raise issues and open a PR (reads GITHUB_TOKEN)")
+    parser.add_argument("--no-review", action="store_true", help="Skip the Nemotron code review; failing tests only")
+    parser.add_argument("--max-issues", type=int, default=DEFAULT_MAX_ISSUES)
+    parser.add_argument("--max-iterations", type=int, default=DEFAULT_MAX_ITERATIONS)
+    args = parser.parse_args()
 
+    token = None
+    if args.live:
+        token = os.environ.get("GITHUB_TOKEN")
+        if not token:
+            parser.error("--live needs a GitHub token in the GITHUB_TOKEN environment variable")
+
+    result = run_agent(
+        args.repo,
+        token,
+        include_review=not args.no_review,
+        max_issues=args.max_issues,
+        max_iterations=args.max_iterations,
+        emit=emit,
+        allow_local=True,
+    )
     print()
     print(f"Result: {result.status}")
-    print(f"Fixed ({len(result.fixed_issues)}): {', '.join(result.fixed_issues) or '(none)'}")
-    print(f"Unresolved ({len(result.unresolved_issues)}): {', '.join(result.unresolved_issues) or '(none)'}")
-    print(f"Patched copy left at: {result.working_dir}")
-    return 0 if result.status == "fixed" else 1
+    print(f"Fixed: {len(result.fixed)}  Unresolved: {len(result.unresolved)}")
+    if result.pr_url:
+        print(f"Pull request: {result.pr_url}")
+    return 0 if result.status in ("clean", "fixed") else 1
 
 
 if __name__ == "__main__":
