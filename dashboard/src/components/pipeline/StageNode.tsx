@@ -12,13 +12,13 @@ import { Handle, Position, type NodeProps } from 'reactflow'
 import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion'
 import { cn } from '@/lib/utils'
 import type { NodeVisualStatus, PipelineNodeId } from '@/state/dashboardReducer'
-import type { RunStatus } from '@/types/events'
 
 export interface StageNodeData {
   label: string
   kind: PipelineNodeId
   status: NodeVisualStatus
-  runStatus: RunStatus
+  /** How the current issue ended, which colours the Loop node once it's done. */
+  outcome: 'fixed' | 'unresolved' | null
 }
 
 const ICONS: Record<PipelineNodeId, typeof Eye> = {
@@ -30,9 +30,9 @@ const ICONS: Record<PipelineNodeId, typeof Eye> = {
   loop: RotateCw,
 }
 
-function toneFor(kind: PipelineNodeId, status: NodeVisualStatus, runStatus: RunStatus) {
-  if (kind === 'loop' && status === 'done') {
-    return runStatus === 'fixed'
+function toneFor(kind: PipelineNodeId, status: NodeVisualStatus, outcome: StageNodeData['outcome']) {
+  if (kind === 'loop' && status === 'done' && outcome) {
+    return outcome === 'fixed'
       ? { border: 'var(--color-pass)', fg: 'var(--color-pass)', bg: 'var(--color-pass-dim)' }
       : { border: 'var(--color-border)', fg: 'var(--color-fg-muted)', bg: 'var(--color-surface-raised)' }
   }
@@ -49,11 +49,11 @@ function toneFor(kind: PipelineNodeId, status: NodeVisualStatus, runStatus: RunS
 }
 
 export function StageNode({ data }: NodeProps<StageNodeData>) {
-  const { label, kind, status, runStatus } = data
+  const { label, kind, status, outcome } = data
   const reducedMotion = usePrefersReducedMotion()
-  const tone = toneFor(kind, status, runStatus)
-  const isLoopDone = kind === 'loop' && status === 'done'
-  const Icon = isLoopDone ? (runStatus === 'fixed' ? CheckCircle2 : XCircle) : ICONS[kind]
+  const tone = toneFor(kind, status, outcome)
+  const isLoopDone = kind === 'loop' && status === 'done' && outcome !== null
+  const Icon = isLoopDone ? (outcome === 'fixed' ? CheckCircle2 : XCircle) : ICONS[kind]
 
   return (
     <div
