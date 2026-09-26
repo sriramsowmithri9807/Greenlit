@@ -11,4 +11,8 @@ export default defineConfig({
       '@': path.resolve(import.meta.dirname, './src'),
     },
   },
+  server: {
+    // In dev, the Python backend (python -m greenlit.server) serves the API.
+    proxy: { '/api': 'http://127.0.0.1:8000' },
+  },
 })
