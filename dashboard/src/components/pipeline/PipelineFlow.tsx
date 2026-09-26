@@ -39,6 +39,8 @@ const FLOWING = 'var(--color-amber)'
 
 export function PipelineFlow({ state }: { state: DashboardState }) {
   const reducedMotion = usePrefersReducedMotion()
+  const current = state.issues.find((issue) => issue.key === state.currentIssueKey)
+  const outcome = current?.status === 'fixed' || current?.status === 'unresolved' ? current.status : null
 
   const nodes = useMemo<Node<StageNodeData>[]>(
     () =>
@@ -52,10 +54,10 @@ export function PipelineFlow({ state }: { state: DashboardState }) {
           label: LABELS[kind],
           kind,
           status: state.nodeStatus[kind],
-          runStatus: state.status,
+          outcome,
         },
       })),
-    [state.nodeStatus, state.status],
+    [state.nodeStatus, outcome],
   )
 
   const edges = useMemo<Edge[]>(() => {
