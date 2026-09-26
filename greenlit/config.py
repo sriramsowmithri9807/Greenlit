@@ -21,8 +21,6 @@ class GreenlitConfig:
     nebius_api_key: str
     nebius_ai_project: str
     tavily_api_key: str | None
-    plan_model_keywords: tuple[str, ...]
-    eval_model_keywords: tuple[str, ...]
 
     @classmethod
     def from_env(cls) -> "GreenlitConfig":
@@ -36,10 +34,4 @@ class GreenlitConfig:
             nebius_api_key=api_key,
             nebius_ai_project=project,
             tavily_api_key=os.environ.get("TAVILY_API_KEY") or None,
-            plan_model_keywords=tuple(
-                os.environ.get("GREENLIT_PLAN_MODEL_KEYWORDS", "nemotron,ultra").split(",")
-            ),
-            eval_model_keywords=tuple(
-                os.environ.get("GREENLIT_EVAL_MODEL_KEYWORDS", "nemotron,nano").split(",")
-            ),
         )
