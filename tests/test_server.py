@@ -62,7 +62,7 @@ def test_start_rejects_non_github_urls_including_local_paths(client, url):
 def test_events_stream_in_order_and_end(client, monkeypatch):
     seen_args = {}
 
-    def fake_agent(repo_url, token, *, include_review, emit):
+    def fake_agent(repo_url, token, *, include_review, emit, approve):
         seen_args.update(repo_url=repo_url, token=token, include_review=include_review)
         emit("phase", {"value": "clone"})
         emit("log_line", {"text": "hello"})
@@ -85,7 +85,7 @@ def test_events_stream_in_order_and_end(client, monkeypatch):
 
 
 def test_reconnect_resumes_after_last_event_id(client, monkeypatch):
-    def fake_agent(repo_url, token, *, include_review, emit):
+    def fake_agent(repo_url, token, *, include_review, emit, approve):
         for i in range(5):
             emit("log_line", {"text": f"line {i}"})
 
@@ -113,3 +113,34 @@ def test_concurrent_run_limit(client, monkeypatch):
         assert client.post("/api/runs", json={"repo_url": "octo/calc"}).status_code == 429
     finally:
         release.set()
+
+
+def test_run_waits_for_approval_and_only_publishes_on_yes(client, monkeypatch):
+    answers = []
+
+    def fake_agent(repo_url, token, *, include_review, emit, approve):
+        emit("approval_required", {"actions": ["Open a pull request"]})
+        answers.append(approve({"actions": ["Open a pull request"]}))
+
+    monkeypatch.setattr(server.agent, "run_agent", fake_agent)
+    run_id = client.post("/api/runs", json={"repo_url": "octo/calc", "token": TOKEN}).json()["run_id"]
+    for _ in range(100):
+        if server._runs[run_id].events:
+            break
+        time.sleep(0.02)
+    time.sleep(0.05)
+    assert not server._runs[run_id].done  # blocked on the question
+
+    assert client.post(f"/api/runs/{run_id}/approval", json={"approve": True}).json() == {"approved": True}
+    _wait_done(run_id)
+    assert answers == [True]
+    # Answering twice, or when nothing was asked, is refused.
+    assert client.post(f"/api/runs/{run_id}/approval", json={"approve": False}).status_code == 409
+    assert client.post("/api/runs/nope/approval", json={"approve": True}).status_code == 404
+
+
+def test_unanswered_approval_times_out_as_no():
+    run = server.Run()
+    assert run.wait_for_approval({}, timeout=0.01) is False
+    assert "nothing was published" in run.events[-1][1]["text"]
+    assert run.answer(True) is False

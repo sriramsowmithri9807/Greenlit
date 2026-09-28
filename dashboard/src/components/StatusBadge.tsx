@@ -32,6 +32,8 @@ const STATUS_CONFIG: Record<RunStatus, Tone & { label: string; pulsing: boolean 
   idle: { label: 'Ready', ...TONES.neutral, pulsing: false },
   scanning: { label: 'Scanning', ...TONES.done, pulsing: true },
   testing: { label: 'Fixing', ...TONES.amber, pulsing: true },
+  awaiting_approval: { label: 'Needs approval', ...TONES.amber, pulsing: true },
+  publishing: { label: 'Publishing', ...TONES.done, pulsing: true },
   clean: { label: 'Clean', ...TONES.pass, pulsing: false },
   fixed: { label: 'All fixed', ...TONES.pass, pulsing: false },
   partial: { label: 'Partly fixed', ...TONES.amber, pulsing: false },

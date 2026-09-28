@@ -41,19 +41,28 @@ function outcomeFor(state: DashboardState, onRestart: () => void): Outcome | nul
       action: { label: 'Open pull request', href: state.pr.url },
     }
   }
+  if (state.approval?.answer === 'declined') {
+    return {
+      tone: 'neutral',
+      icon: <Info size={20} />,
+      title: `Not published: ${fixed} of ${total} fixes verified`,
+      body: 'You chose not to publish, so nothing was written to GitHub. The verified changes are on the right.',
+      action: { label: 'New scan', onClick: onRestart },
+    }
+  }
   if (state.repo?.mode === 'dry_run') {
     return {
       tone: 'neutral',
       icon: <Info size={20} />,
       title: `Dry run finished: ${fixed} of ${total} fixes verified`,
-      body: 'Nothing was pushed. The combined diff is on the right. Add a token to raise these as issues and open a pull request.',
+      body: 'Nothing was pushed. The verified changes are on the right. Add a token to raise these as issues and open a pull request.',
     }
   }
   return {
     tone: 'neutral',
     icon: <Info size={20} />,
     title: 'No fix passed verification',
-    body: 'Nothing was pushed. Greenlit commented on each issue with what it tried.',
+    body: 'Nothing was pushed. Greenlit raised the issues and commented on each with what it tried.',
   }
 }
 

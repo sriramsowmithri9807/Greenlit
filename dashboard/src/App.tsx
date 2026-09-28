@@ -1,6 +1,8 @@
 import confetti from 'canvas-confetti'
 import { motion } from 'framer-motion'
 import { useEffect, useRef } from 'react'
+import { ApprovalCard } from '@/components/ApprovalCard'
+import { ChangesPanel } from '@/components/ChangesPanel'
 import { DiffViewer } from '@/components/DiffViewer'
 import { Header } from '@/components/Header'
 import { IssuesPanel } from '@/components/IssuesPanel'
@@ -17,7 +19,7 @@ import { MOCK_MODE, useRun } from '@/hooks/useRun'
 import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion'
 
 function App() {
-  const { state, view, start, reset, health, starting, startError } = useRun()
+  const { state, view, start, reset, health, starting, startError, answerApproval } = useRun()
   const reducedMotion = usePrefersReducedMotion()
   const celebrated = useRef(false)
 
@@ -41,7 +43,7 @@ function App() {
 
   const current = state.issues.find((issue) => issue.key === state.currentIssueKey)
   const pipelineTitle = current ? `Fixing ${current.number ? `#${current.number} · ` : ''}${current.title}` : 'Pipeline'
-  const showFinalDiffLabel = state.phase === 'done' && state.repo?.mode === 'dry_run'
+  const awaitingApproval = state.approval !== null && state.approval.answer === null && state.status !== 'error'
 
   return (
     <motion.div
@@ -59,6 +61,7 @@ function App() {
       </Header>
 
       <PhaseStepper phase={state.phase} status={state.status} dryRun={state.repo?.mode === 'dry_run'} />
+      {awaitingApproval && state.approval && <ApprovalCard request={state.approval.request} onAnswer={answerApproval} />}
       <ResultBanner state={state} onRestart={reset} />
 
       <main className="grid min-h-0 flex-1 grid-cols-1 gap-4 px-6 pb-6 lg:grid-cols-[minmax(300px,360px)_1fr]">
@@ -74,13 +77,20 @@ function App() {
             </div>
           </Card>
 
-          <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 xl:grid-cols-2">
+          <div className={`grid min-h-0 flex-1 grid-cols-1 gap-4 ${state.changes ? 'xl:grid-cols-[3fr_2fr]' : 'xl:grid-cols-2'}`}>
             <Card className="flex min-h-[220px] flex-col overflow-hidden">
               <CardHeader>
-                <CardTitle>{showFinalDiffLabel ? 'All verified changes' : 'Proposed fix'}</CardTitle>
+                <CardTitle>{state.changes ? 'Verified changes' : 'Proposed fix'}</CardTitle>
+                {state.changes && (
+                  <span className="font-mono text-xs text-[var(--color-fg-muted)]">
+                    {state.changes.totals.files} file{state.changes.totals.files === 1 ? '' : 's'}{' '}
+                    <span className="text-[var(--color-pass)]">+{state.changes.totals.added}</span>{' '}
+                    <span className="text-[var(--color-fail)]">-{state.changes.totals.removed}</span>
+                  </span>
+                )}
               </CardHeader>
               <div className="min-h-0 flex-1">
-                <DiffViewer diff={state.diff} revision={state.diffRevision} />
+                {state.changes ? <ChangesPanel changes={state.changes} /> : <DiffViewer diff={state.diff} revision={state.diffRevision} />}
               </div>
             </Card>
             <Card className="flex min-h-[220px] flex-col overflow-hidden">

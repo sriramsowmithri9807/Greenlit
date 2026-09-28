@@ -2,6 +2,7 @@
 
     POST /api/runs               {repo_url, token?, include_review?} -> {run_id}
     GET  /api/runs/{id}/events   Server-Sent Events, resumable via Last-Event-ID
+    POST /api/runs/{id}/approval {approve} -> answers the run's "publish to GitHub?"
     GET  /api/health             which credentials the server has configured
     GET  /                       the built dashboard (dashboard/dist), if present
 
@@ -31,6 +32,7 @@ MAX_ACTIVE_RUNS = 2
 MAX_KEPT_RUNS = 20
 _POLL_SECONDS = 0.15
 _HEARTBEAT_SECONDS = 15
+APPROVAL_TIMEOUT_SECONDS = 30 * 60
 DASHBOARD_DIST = Path(__file__).resolve().parent.parent / "dashboard" / "dist"
 
 
@@ -40,14 +42,41 @@ class Run:
         self.events: list[tuple[str, dict]] = []
         self.done = False
         self._lock = threading.Lock()
+        self._awaiting_approval = False
+        self._answered = threading.Event()
+        self._approved = False
 
     def emit(self, event_type: str, payload: dict) -> None:
         with self._lock:
             self.events.append((event_type, payload))
 
+    def wait_for_approval(self, request: dict, timeout: float = APPROVAL_TIMEOUT_SECONDS) -> bool:
+        """Called from the run's worker thread; blocks until the user answers
+        in the dashboard. No answer in time counts as a no."""
+        with self._lock:
+            self._awaiting_approval = True
+        answered = self._answered.wait(timeout)
+        with self._lock:
+            self._awaiting_approval = False
+            if not answered:
+                self.events.append(("log_line", {"text": "No answer to the publish request in 30 minutes, so nothing was published."}))
+            return answered and self._approved
+
+    def answer(self, approve: bool) -> bool:
+        with self._lock:
+            if not self._awaiting_approval or self._answered.is_set():
+                return False
+            self._approved = approve
+            self._answered.set()
+            return True
+
     def snapshot_from(self, index: int) -> list[tuple[int, str, dict]]:
         with self._lock:
             return [(i, *self.events[i]) for i in range(index, len(self.events))]
+
+
+class ApprovalRequest(BaseModel):
+    approve: bool
 
 
 class RunRequest(BaseModel):
@@ -96,12 +125,22 @@ def start_run(request: RunRequest) -> dict:
 
     def work() -> None:
         try:
-            agent.run_agent(repo_url, token, include_review=include_review, emit=run.emit)
+            agent.run_agent(repo_url, token, include_review=include_review, emit=run.emit, approve=run.wait_for_approval)
         finally:
             run.done = True
 
     threading.Thread(target=work, name=f"greenlit-run-{run.id}", daemon=True).start()
     return {"run_id": run.id}
+
+
+@app.post("/api/runs/{run_id}/approval")
+def answer_approval(run_id: str, request: ApprovalRequest) -> dict:
+    run = _runs.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Unknown run")
+    if not run.answer(request.approve):
+        raise HTTPException(status_code=409, detail="This run isn't waiting for approval.")
+    return {"approved": request.approve}
 
 
 @app.get("/api/runs/{run_id}/events")

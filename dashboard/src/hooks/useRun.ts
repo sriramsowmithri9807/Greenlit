@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
-import { playMockRun } from '@/mock/replayer'
+import { playMockRun, type MockRun } from '@/mock/replayer'
 import { dashboardReducer, initialDashboardState } from '@/state/dashboardReducer'
 import { EVENT_TYPES, type GreenlitEvent } from '@/types/events'
 
@@ -30,7 +30,8 @@ export function useRun() {
   const [starting, setStarting] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
   const sourceRef = useRef<EventSource | null>(null)
-  const cancelMockRef = useRef<() => void>(() => {})
+  const mockRunRef = useRef<MockRun | null>(null)
+  const runIdRef = useRef<string | null>(null)
 
   useEffect(() => {
     if (MOCK_MODE) return
@@ -47,8 +48,9 @@ export function useRun() {
   const stopStreams = useCallback(() => {
     sourceRef.current?.close()
     sourceRef.current = null
-    cancelMockRef.current()
-    cancelMockRef.current = () => {}
+    mockRunRef.current?.cancel()
+    mockRunRef.current = null
+    runIdRef.current = null
   }, [])
 
   useEffect(() => stopStreams, [stopStreams])
@@ -61,7 +63,7 @@ export function useRun() {
 
       if (MOCK_MODE) {
         setView('run')
-        cancelMockRef.current = playMockRun(
+        mockRunRef.current = playMockRun(
           { repoFullName: repoNameFromUrl(repoUrl), live: token.trim() !== '', partial: mockParam === 'partial' },
           dispatch,
         )
@@ -82,6 +84,7 @@ export function useRun() {
           return
         }
 
+        runIdRef.current = body.run_id
         const source = new EventSource(`/api/runs/${body.run_id}/events`)
         sourceRef.current = source
         for (const type of EVENT_TYPES) {
@@ -117,5 +120,27 @@ export function useRun() {
     setView('form')
   }, [stopStreams])
 
-  return { state, view, start, reset, health, starting, startError }
+  /** Answers the run's "publish to GitHub?" question. Returns an error
+   * message, or null once the server has accepted the answer. */
+  const answerApproval = useCallback(async (approve: boolean): Promise<string | null> => {
+    if (MOCK_MODE) {
+      mockRunRef.current?.answer(approve)
+      return null
+    }
+    if (!runIdRef.current) return 'This run is no longer active.'
+    try {
+      const response = await fetch(`/api/runs/${runIdRef.current}/approval`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approve }),
+      })
+      if (response.ok) return null
+      const body = await response.json().catch(() => ({}))
+      return typeof body.detail === 'string' ? body.detail : `The server returned ${response.status}.`
+    } catch {
+      return "Couldn't reach the Greenlit server."
+    }
+  }, [])
+
+  return { state, view, start, reset, health, starting, startError, answerApproval }
 }

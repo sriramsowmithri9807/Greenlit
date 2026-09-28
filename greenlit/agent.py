@@ -1,14 +1,17 @@
 """The Greenlit agent: a GitHub repo goes in; issues get raised, fixed,
 verified in a sandbox, and come back as a pull request.
 
-    clone -> scan (test suite + Nemotron code review) -> raise GitHub issues
-          -> fix each one (greenlit.orchestrator.FixEngine) -> commit + push
-          -> open a PR that closes what was fixed, comment on what wasn't
+    clone -> scan (test suite + Nemotron code review) -> list issues
+          -> fix each one (greenlit.orchestrator.FixEngine)
+          -> review: report every change (files, lines, code) and ask to publish
+          -> if approved: raise the GitHub issues, commit + push, open a PR that
+             closes what was fixed, comment on what wasn't
 
-With a token, everything lands on a new `greenlit/fix-*` branch and a pull
-request: nothing is ever pushed to the default branch. Without a token it's
-a read-only dry run of the same pipeline: fixes are still verified in the
-sandbox and shown in the UI, but nothing is written to GitHub.
+With a token, nothing is written to GitHub until `approve` says yes, and then
+everything lands on a new `greenlit/fix-*` branch and a pull request: nothing
+is ever pushed to the default branch. Without a token it's a read-only dry
+run of the same pipeline: fixes are still verified in the sandbox and the
+changes are shown, but nothing is written to GitHub.
 """
 from __future__ import annotations
 
@@ -22,6 +25,7 @@ from pathlib import Path
 
 from greenlit.clients.sandbox import Sandbox
 from greenlit.config import GreenlitConfig
+from greenlit.changes import summarize
 from greenlit.github import GitHubAPI, GitHubError, GitWorkspace, mask, parse_repo_url
 from greenlit.issues import Issue
 from greenlit.orchestrator import DEFAULT_MAX_ITERATIONS, FixEngine, FixResult
@@ -31,6 +35,7 @@ from greenlit.repo_files import IGNORED_DIRS
 from greenlit.review import review
 
 Emit = Callable[[str, dict], None]
+Approve = Callable[[dict], bool]
 
 DEFAULT_MAX_ISSUES = 6
 BRANCH_PREFIX = "greenlit/fix-"
@@ -49,10 +54,15 @@ class AgentResult:
     fixed: list[str] = field(default_factory=list)
     unresolved: list[str] = field(default_factory=list)
     pr_url: str | None = None
+    published: bool = False
 
 
 def _noop_emit(event_type: str, payload: dict) -> None:
     pass
+
+
+def _decline(request: dict) -> bool:
+    return False
 
 
 def _default_sandbox() -> Sandbox:
@@ -114,6 +124,39 @@ def _pr_body(fixed: list[Issue], unresolved: list[Issue], incidental: set[str], 
     return "\n".join(lines)
 
 
+def _publish_request(
+    repo: str,
+    branch: str,
+    base: str,
+    issues: list[Issue],
+    fixed: list[Issue],
+    unresolved: list[Issue],
+    snapshots: dict[str, str],
+    changes: dict,
+) -> dict:
+    """What publishing would write to GitHub, for the user to approve."""
+    commits = sum(1 for issue in fixed if issue.key in snapshots)
+    actions = [f"Raise {len(issues)} issue(s) on {repo}, labelled '{LABEL_NAME}'"]
+    if commits:
+        actions += [
+            f"Push {commits} commit(s) to a new branch {branch} ({base} is not touched)",
+            f"Open a pull request {branch} -> {base} that closes {len(fixed)} issue(s)",
+        ]
+    if unresolved:
+        actions.append(f"Comment on the {len(unresolved)} unfixed issue(s) with what was tried")
+    return {
+        "repo": repo,
+        "branch": branch,
+        "base": base,
+        "issues": len(issues),
+        "fixed": len(fixed),
+        "unresolved": len(unresolved),
+        "commits": commits,
+        "actions": actions,
+        "changes": changes,
+    }
+
+
 def _unresolved_comment(result: FixResult | None) -> str:
     if not result or not result.attempts:
         return "Greenlit couldn't produce a fix for this that passed verification."
@@ -133,6 +176,7 @@ def run_agent(
     max_issues: int = DEFAULT_MAX_ISSUES,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     emit: Emit = _noop_emit,
+    approve: Approve = _decline,
     sandbox_factory: Callable[[], Sandbox] = _default_sandbox,
     api_factory: Callable[[str | None], GitHubAPI] = GitHubAPI,
     remote_url: str | None = None,
@@ -140,7 +184,12 @@ def run_agent(
 ) -> AgentResult:
     """`repo_url` is a GitHub URL, or (only when `allow_local`, i.e. from the
     CLI, never from the web server) a local folder, which always runs as a
-    dry run."""
+    dry run.
+
+    `approve` is called once, after every fix is verified, with what
+    publishing would do (see _publish_request). It may block while it asks
+    the user. Only a True answer lets anything be written to GitHub; the
+    default declines."""
     token = (token or "").strip() or None
     local_dir = Path(repo_url).expanduser() if allow_local and Path(repo_url).expanduser().is_dir() else None
     live = token is not None and local_dir is None
@@ -253,40 +302,28 @@ def run_agent(
             emit("phase", {"value": "done"})
             return AgentResult(status="clean")
 
-        # --- raise ----------------------------------------------------------------
-        emit("phase", {"value": "raise"})
-        if live:
-            labels = [LABEL_NAME]
-            try:
-                api.ensure_label(ref, LABEL_NAME, LABEL_COLOR, LABEL_DESCRIPTION)
-            except GitHubError:
-                labels = []
-            for issue in issues:
-                created = api.create_issue(ref, f"[Greenlit] {issue.title}", issue.github_body(), labels)
-                issue.number, issue.url = created["number"], created["html_url"]
-                emit("issue_raised", issue.to_event())
-            emit("log_line", {"text": f"Raised {len(issues)} issue(s) on {ref.full_name}"})
-        else:
-            for issue in issues:
-                emit("issue_raised", issue.to_event())
-            emit("log_line", {"text": "Dry run: not raising issues on GitHub (no token)"})
+        # --- issues -----------------------------------------------------------------
+        # Found issues are listed locally. Nothing is written to GitHub until
+        # every fix is verified and the user has approved publishing.
+        emit("phase", {"value": "issues"})
+        for issue in issues:
+            emit("issue_raised", issue.to_event())
+        emit(
+            "log_line",
+            {"text": f"Found {len(issues)} issue(s)" + (". Nothing goes to GitHub until you approve it." if live else " (dry run)")},
+        )
 
         # --- fix --------------------------------------------------------------------
         emit("phase", {"value": "fix"})
         emit("status", {"value": "testing"})
-        branch = f"{BRANCH_PREFIX}{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
-        author_name = author_email = ""
-        if live:
-            workspace.create_branch(branch)
-            user = api.get_user()
-            author_name = user.get("name") or user["login"]
-            author_email = f"{user['id']}+{user['login']}@users.noreply.github.com"
 
         fixed: list[Issue] = []
         unresolved: list[Issue] = []
         incidental: set[str] = set()
         results: dict[str, FixResult] = {}
-        pushed = False
+        snapshots: dict[str, str] = {}  # issue key -> tree after its fix
+        fix_diffs: list[dict] = []
+        base_tree = previous_tree = workspace.head_tree()
 
         for position, issue in enumerate(issues):
             emit("issue_start", {"key": issue.key, "remaining": len(issues) - position})
@@ -306,43 +343,87 @@ def run_agent(
 
             baseline = result.suite_after or baseline
             fixed.append(issue)
-            if live:
-                message = _commit_message(issue, result)
-                sha = workspace.commit(result.changed_files, message, author_name=author_name, author_email=author_email)
-                workspace.push(branch)
-                pushed = True
-                emit(
-                    "commit",
-                    {
-                        "key": issue.key,
-                        "sha": sha,
-                        "message": message.splitlines()[0],
-                        "url": f"{ref.html_url}/commit/{sha}",
-                    },
-                )
+            tree = workspace.snapshot(result.changed_files)
+            snapshots[issue.key] = tree
+            fix_diffs.append(
+                {"key": issue.key, "title": issue.title, "location": issue.location, "diff": workspace.diff_trees(previous_tree, tree)}
+            )
+            previous_tree = tree
             emit("issue_end", {"key": issue.key, "status": "fixed"})
 
-        # --- publish -----------------------------------------------------------------
-        emit("phase", {"value": "publish"})
-        pr_url = None
-        if live:
-            if pushed:
-                pr = api.create_pull(
-                    ref,
-                    title=f"Greenlit: fix {len(fixed)} issue(s)",
-                    head=branch,
-                    base=default_branch,
-                    body=_pr_body(fixed, unresolved, incidental, results),
-                )
-                pr_url = pr["html_url"]
-                emit("pr_opened", {"number": pr["number"], "url": pr_url})
-            for issue in unresolved:
-                if issue.number:
-                    api.comment_on_issue(ref, issue.number, _unresolved_comment(results.get(issue.key)))
-        else:
-            combined = workspace.pending_diff()
+        # Verification is over; don't hold a sandbox open while waiting on the user.
+        sandbox.close()
+        sandbox = None
+
+        # --- review -----------------------------------------------------------------
+        emit("phase", {"value": "review"})
+        changes = summarize(fix_diffs)
+        if fix_diffs:
+            emit("changes_ready", changes)
+            for fix in changes["fixes"]:
+                for file in fix["files"]:
+                    emit(
+                        "log_line",
+                        {"text": f"Changed {file['path']} lines {file['lines_changed']} (+{file['added']} -{file['removed']}): {fix['title']}"},
+                    )
+            combined = workspace.diff_trees(base_tree, previous_tree)
             if combined:
                 emit("diff_ready", {"diff": combined})
+
+        pr_url = None
+        published = False
+        if live:
+            branch = f"{BRANCH_PREFIX}{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
+            request = _publish_request(ref.full_name, branch, default_branch, issues, fixed, unresolved, snapshots, changes)
+            emit("status", {"value": "awaiting_approval"})
+            emit("approval_required", request)
+            published = bool(approve(request))
+            emit("approval", {"approved": published})
+
+            if published:
+                emit("phase", {"value": "publish"})
+                emit("status", {"value": "publishing"})
+                labels = [LABEL_NAME]
+                try:
+                    api.ensure_label(ref, LABEL_NAME, LABEL_COLOR, LABEL_DESCRIPTION)
+                except GitHubError:
+                    labels = []
+                for issue in issues:
+                    created = api.create_issue(ref, f"[Greenlit] {issue.title}", issue.github_body(), labels)
+                    issue.number, issue.url = created["number"], created["html_url"]
+                    emit("issue_published", {"key": issue.key, "number": issue.number, "url": issue.url})
+                emit("log_line", {"text": f"Raised {len(issues)} issue(s) on {ref.full_name}"})
+
+                committed = [issue for issue in fixed if issue.key in snapshots]
+                if committed:
+                    user = api.get_user()
+                    author_name = user.get("name") or user["login"]
+                    author_email = f"{user['id']}+{user['login']}@users.noreply.github.com"
+                    workspace.create_branch(branch)
+                    for issue in committed:
+                        message = _commit_message(issue, results[issue.key])
+                        sha = workspace.commit_tree(snapshots[issue.key], message, author_name=author_name, author_email=author_email)
+                        emit(
+                            "commit",
+                            {"key": issue.key, "sha": sha, "message": message.splitlines()[0], "url": f"{ref.html_url}/commit/{sha}"},
+                        )
+                    workspace.push(branch)
+                    emit("log_line", {"text": f"Pushed {len(committed)} commit(s) to {branch}"})
+                    pr = api.create_pull(
+                        ref,
+                        title=f"Greenlit: fix {len(fixed)} issue(s)",
+                        head=branch,
+                        base=default_branch,
+                        body=_pr_body(fixed, unresolved, incidental, results),
+                    )
+                    pr_url = pr["html_url"]
+                    emit("pr_opened", {"number": pr["number"], "url": pr_url})
+                for issue in unresolved:
+                    if issue.number:
+                        api.comment_on_issue(ref, issue.number, _unresolved_comment(results.get(issue.key)))
+            else:
+                emit("log_line", {"text": "Publishing declined. Nothing was written to GitHub."})
+        else:
             emit(
                 "log_line",
                 {"text": f"Dry run complete: {len(fixed)} fix(es) verified in the sandbox, nothing pushed. Add a token to raise issues and open a pull request."},
@@ -357,6 +438,7 @@ def run_agent(
             fixed=[i.key for i in fixed],
             unresolved=[i.key for i in unresolved],
             pr_url=pr_url,
+            published=published,
         )
 
     except AgentError as exc:

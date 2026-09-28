@@ -40,7 +40,7 @@ DIVIDE_FIX_ON_TOP = make_diff(
 )
 
 
-def _run(remote, *, token=TOKEN, planner, reviewer=None, api=None, **kwargs):
+def _run(remote, *, token=TOKEN, planner, reviewer=None, api=None, approve=lambda request: True, **kwargs):
     events = []
     api = api or FakeGitHubAPI(token)
     with (
@@ -55,6 +55,7 @@ def _run(remote, *, token=TOKEN, planner, reviewer=None, api=None, **kwargs):
             sandbox_factory=LocalSandbox,
             api_factory=lambda _token: api,
             remote_url=str(remote),
+            approve=approve,
             **kwargs,
         )
     return result, events, api
@@ -110,8 +111,12 @@ def test_live_run_raises_issues_fixes_them_and_opens_a_pr(bare_remote):
 
     types = _types(events)
     phases = [p["value"] for t, p in events if t == "phase"]
-    assert phases == ["clone", "scan", "raise", "fix", "publish", "done"]
+    assert phases == ["clone", "scan", "issues", "fix", "review", "publish", "done"]
     assert types.count("issue_raised") == 3 and types.count("commit") == 3
+    # Nothing reached GitHub before the user approved.
+    approval_at = types.index("approval_required")
+    assert types.index("issue_published") > approval_at and types.index("commit") > approval_at
+    assert ("approval", {"approved": True}) in events
     assert ("pr_opened", {"number": 100, "url": f"{REPO_URL}/pull/100"}) in events
     assert TOKEN not in json.dumps(events)
 
@@ -228,3 +233,38 @@ def test_demo_fixtures_are_still_broken(fixture, copy_fixture):
     """If someone 'fixes' a demo fixture, the demo stops demonstrating anything."""
     suite = LocalSandbox().run_tests(copy_fixture(fixture), "python -m pytest -q -p no:cacheprovider")
     assert suite.exit_code == 1
+
+
+def test_every_change_is_reported_with_files_and_lines_before_asking(bare_remote):
+    remote = bare_remote("fixture_multi")
+    planner = FakePlanner({"test_add": [plan(ADD_FIX)], "test_average": [plan(AVG_FIX_ON_TOP)]})
+    requests = []
+
+    _run(remote, planner=planner, approve=lambda request: requests.append(request) or True)
+
+    (request,) = requests
+    assert request["commits"] == 2 and request["fixed"] == 2
+    assert any("Open a pull request" in action for action in request["actions"])
+    add_fix, avg_fix = request["changes"]["fixes"]
+    (file,) = add_fix["files"]
+    assert file["path"] == "calculator.py" and (file["added"], file["removed"]) == (1, 1)
+    assert file["lines_changed"] == "2"
+    removed = [(l["old"], l["text"]) for h in file["hunks"] for l in h["lines"] if l["kind"] == "del"]
+    added = [(l["new"], l["text"]) for h in file["hunks"] for l in h["lines"] if l["kind"] == "add"]
+    assert removed == [(2, "    return a - b")] and added == [(2, "    return a + b")]
+    # The second fix is reported on its own, relative to the first.
+    assert avg_fix["files"][0]["lines_changed"] == "10" and request["changes"]["totals"]["files"] == 1
+
+
+def test_declining_writes_nothing_to_github(bare_remote):
+    remote = bare_remote("fixture_multi")
+    branches_before = git("branch", "--format=%(refname:short)", cwd=remote)
+    planner = FakePlanner({"test_add": [plan(ADD_FIX)], "test_average": [plan(AVG_FIX_ON_TOP)]})
+
+    result, events, api = _run(remote, planner=planner, approve=lambda request: False)
+
+    assert result.status == "fixed" and not result.published and result.pr_url is None
+    assert api.issues == [] and api.pulls == [] and api.comments == [] and api.labels == []
+    assert git("branch", "--format=%(refname:short)", cwd=remote) == branches_before
+    assert ("approval", {"approved": False}) in events
+    assert "changes_ready" in _types(events) and "commit" not in _types(events)

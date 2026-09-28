@@ -1,9 +1,11 @@
 # Greenlit dashboard
 
 The web UI: a start screen (repo URL + optional token), then a live view of
-the run: phase stepper, issues as they're raised and fixed, the per-issue
+the run: phase stepper, issues as they're found and fixed, the per-issue
 PERCEIVE → PLAN → RESEARCH → ACT → EVALUATE → LOOP pipeline, the current
-diff, the log, and the resulting pull request.
+diff, and the log. At the end: the verified changes (file, line numbers, code)
+and, for a live run, the "Raise pull request?" approval. Answers go to
+`POST /api/runs/{id}/approval`. Last comes the resulting pull request.
 
 ## Development
 
@@ -21,7 +23,8 @@ http://127.0.0.1:8000.
 `http://localhost:5173/?mock=1` replays a scripted run, and `?mock=partial`
 replays one where an issue can't be fixed. No backend or credentials are
 needed. The UI labels it as a scripted demo. Leave the token empty to see the
-dry-run flavour, or fill anything in for the live flavour.
+dry-run flavour, or fill anything in for the live flavour. The live flavour
+pauses at the approval card, like a real run.
 
 ## Event contract
 

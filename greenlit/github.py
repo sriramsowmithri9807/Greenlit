@@ -192,20 +192,29 @@ class GitWorkspace:
     def create_branch(self, name: str) -> None:
         self._git("checkout", "-b", name)
 
-    def commit(self, paths: list[str], message: str, *, author_name: str, author_email: str) -> str:
-        self._git("add", "--", *paths)
-        self._git(
+    def head_tree(self) -> str:
+        return self._git("rev-parse", "HEAD^{tree}")
+
+    def snapshot(self, paths: list[str]) -> str:
+        """Stage `paths` and return the resulting tree id. Fixes are
+        snapshotted locally like this and only turned into commits once the
+        user has approved publishing (see commit_tree)."""
+        if paths:
+            self._git("add", "-A", "--", *paths)
+        return self._git("write-tree")
+
+    def diff_trees(self, old: str, new: str) -> str:
+        return self._git("diff", old, new)
+
+    def commit_tree(self, tree: str, message: str, *, author_name: str, author_email: str) -> str:
+        """Commit a snapshot on top of HEAD and advance the current branch."""
+        sha = self._git(
             "-c", f"user.name={author_name}",
             "-c", f"user.email={author_email}",
-            "commit", "-q", "-m", message,
+            "commit-tree", tree, "-p", "HEAD", "-m", message,
         )
-        return self._git("rev-parse", "HEAD")
+        self._git("update-ref", "HEAD", sha)
+        return sha
 
     def push(self, branch: str) -> None:
         self._git("push", "-q", "origin", f"HEAD:refs/heads/{branch}")
-
-    def pending_diff(self) -> str:
-        """Everything changed in the working tree since the clone, new files
-        included (used for dry runs, where nothing is committed)."""
-        self._git("add", "-A")
-        return self._git("diff", "--cached")

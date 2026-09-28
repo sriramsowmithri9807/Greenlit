@@ -1,4 +1,4 @@
-import type { GreenlitEvent, GreenlitEventMap, IssueKind, Phase, RunStatus, Stage } from '@/types/events'
+import type { Changes, GreenlitEvent, GreenlitEventMap, IssueKind, Phase, PublishRequest, RunStatus, Stage } from '@/types/events'
 
 export type PipelineNodeId = Stage | 'loop'
 
@@ -38,6 +38,9 @@ export interface DashboardState {
   logs: LogEntry[]
   pr: GreenlitEventMap['pr_opened'] | null
   error: string | null
+  changes: Changes | null
+  /** The publish question: asked (answer null), then answered. */
+  approval: { request: PublishRequest; answer: 'approved' | 'declined' | null } | null
 }
 
 const idleStages: Record<PipelineNodeId, NodeVisualStatus> = {
@@ -63,6 +66,8 @@ export const initialDashboardState: DashboardState = {
   logs: [],
   pr: null,
   error: null,
+  changes: null,
+  approval: null,
 }
 
 const NEXT_STAGE: Record<Stage, PipelineNodeId> = {
@@ -184,6 +189,22 @@ export function dashboardReducer(state: DashboardState, event: DashboardAction):
 
     case 'diff_ready':
       return { ...state, diff: event.diff, diffRevision: state.diffRevision + 1 }
+
+    case 'changes_ready':
+      return { ...state, changes: { fixes: event.fixes, totals: event.totals } }
+
+    case 'approval_required': {
+      const { type: _type, ...request } = event
+      return { ...state, approval: { request, answer: null } }
+    }
+
+    case 'approval':
+      return state.approval
+        ? { ...state, approval: { ...state.approval, answer: event.approved ? 'approved' : 'declined' } }
+        : state
+
+    case 'issue_published':
+      return { ...state, issues: updateIssue(state, event.key, { number: event.number, url: event.url }) }
 
     case 'commit':
       return { ...state, issues: updateIssue(state, event.key, { commit: { sha: event.sha, url: event.url } }) }

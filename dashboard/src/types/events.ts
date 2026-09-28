@@ -6,13 +6,15 @@ export type RunStatus =
   | 'idle'
   | 'scanning'
   | 'testing'
+  | 'awaiting_approval'
+  | 'publishing'
   | 'clean'
   | 'fixed'
   | 'partial'
   | 'unresolved'
   | 'error'
 
-export type Phase = 'clone' | 'scan' | 'raise' | 'fix' | 'publish' | 'done'
+export type Phase = 'clone' | 'scan' | 'issues' | 'fix' | 'review' | 'publish' | 'done'
 
 export type IssueKind = 'test' | 'review'
 
@@ -20,6 +22,43 @@ export interface StageResult {
   unfamiliar_api?: boolean
   status?: string
   [key: string]: unknown
+}
+
+/** One changed line. `old`/`new` are line numbers before/after the change. */
+export interface ChangeLine {
+  kind: 'add' | 'del' | 'ctx'
+  old: number | null
+  new: number | null
+  text: string
+}
+
+export interface ChangedFile {
+  path: string
+  status: 'modified' | 'added' | 'deleted'
+  added: number
+  removed: number
+  /** Changed line numbers in the new file, e.g. "2, 30-34". */
+  lines_changed: string
+  hunks: { header: string; lines: ChangeLine[] }[]
+}
+
+/** Every verified fix and what it changed (greenlit/changes.py). */
+export interface Changes {
+  fixes: { key: string; title: string; location: string | null; files: ChangedFile[] }[]
+  totals: { fixes: number; files: number; added: number; removed: number }
+}
+
+/** What publishing would write to GitHub; the run waits for a yes/no. */
+export interface PublishRequest {
+  repo: string
+  branch: string
+  base: string
+  issues: number
+  fixed: number
+  unresolved: number
+  commits: number
+  actions: string[]
+  changes: Changes
 }
 
 export interface GreenlitEventMap {
@@ -42,6 +81,10 @@ export interface GreenlitEventMap {
   iteration: { count: number }
   log_line: { text: string }
   diff_ready: { diff: string }
+  changes_ready: Changes
+  approval_required: PublishRequest
+  approval: { approved: boolean }
+  issue_published: { key: string; number: number; url: string }
   commit: { key: string; sha: string; message: string; url: string | null }
   pr_opened: { number: number; url: string }
   run_error: { message: string }
@@ -65,6 +108,10 @@ export const EVENT_TYPES = [
   'iteration',
   'log_line',
   'diff_ready',
+  'changes_ready',
+  'approval_required',
+  'approval',
+  'issue_published',
   'commit',
   'pr_opened',
   'run_error',

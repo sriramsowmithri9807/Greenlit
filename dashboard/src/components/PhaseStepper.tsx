@@ -7,9 +7,10 @@ import type { Phase, RunStatus } from '@/types/events'
 const STEPS: { phase: Exclude<Phase, 'done'>; live: string; dryRun: string }[] = [
   { phase: 'clone', live: 'Clone', dryRun: 'Clone' },
   { phase: 'scan', live: 'Scan', dryRun: 'Scan' },
-  { phase: 'raise', live: 'Raise issues', dryRun: 'List issues' },
+  { phase: 'issues', live: 'Find issues', dryRun: 'Find issues' },
   { phase: 'fix', live: 'Fix', dryRun: 'Fix' },
-  { phase: 'publish', live: 'Open PR', dryRun: 'Show diff' },
+  { phase: 'review', live: 'Review changes', dryRun: 'Review changes' },
+  { phase: 'publish', live: 'Raise PR', dryRun: 'Raise PR' },
 ]
 
 type StepState = 'pending' | 'active' | 'done' | 'failed'

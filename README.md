@@ -1,17 +1,19 @@
 # Greenlit
 
-Paste a GitHub repo URL. Greenlit finds the bugs, files each one as a GitHub
-issue, writes a fix for each, proves every fix by running the repo's tests in
-an isolated sandbox, and opens a pull request that closes the issues it fixed.
+Paste a GitHub repo URL. Greenlit finds the bugs, writes a fix for each,
+proves every fix by running the repo's tests in an isolated sandbox, and shows
+you exactly what it changed: every file, line number and line of code. Then it
+asks you. Only when you say yes does it file the bugs as GitHub issues and
+open a pull request that closes the ones it fixed.
 
 Built for the Nebius x NVIDIA Global AI Hackathon (Coding & Agentic
 Engineering track).
 
 ```
-repo URL ─► clone ─► scan ─────────────► raise issues ─► fix each issue ───────────────► commit + PR
-                     ├ test suite            (GitHub)    PERCEIVE → PLAN → [RESEARCH]
-                     │ (Nebius sandbox)                  → ACT → EVALUATE → retry
-                     └ code review
+repo URL ─► clone ─► scan ─────────────► issues ─► fix each issue ───────────► review ─────────► publish
+                     ├ test suite                   PERCEIVE → PLAN → [RESEARCH]   files, lines,   (only on yes)
+                     │ (Nebius sandbox)             → ACT → EVALUATE → retry       code; ask to    issues, commits,
+                     └ code review                                                 raise the PR    push, PR
                        (Nemotron 3 Ultra)
 ```
 
@@ -59,15 +61,22 @@ In the UI, paste a repo URL:
 
 - **URL only**: a read-only dry run. Issues are found and fixes verified, and
   the combined diff is shown. Nothing is written to GitHub.
-- **URL + token**: the full run. Issues are raised on the repo, each fix is
-  pushed as its own commit to a new `greenlit/fix-*` branch, and a pull request
-  is opened. Nothing is ever pushed to the default branch. Use a
+- **URL + token**: the full run. Once every fix is verified, the run pauses
+  on a change report (each fix's files, changed line numbers, and the removed
+  and added code) and asks **Raise pull request?** Nothing has touched GitHub
+  at that point. On yes, the issues are raised, each fix is pushed as its own
+  commit to a new `greenlit/fix-*` branch, and a pull request is opened. On
+  no, or with no answer within 30 minutes, nothing is written. Nothing is ever
+  pushed to the default branch. Use a
   [fine-grained token](https://github.com/settings/personal-access-tokens/new)
   for that repo with Contents, Issues and Pull requests set to Read and write.
 
 CLI equivalent:
-`python scripts/run_repo.py https://github.com/owner/repo [--live]`. It also
-takes a local folder, for example `python scripts/run_repo.py demo/fixture_multi`.
+`python scripts/run_repo.py https://github.com/owner/repo [--live]`. It prints
+the same change report in the terminal, then asks `Raise the pull request on
+owner/repo? [y/N]`. Pass `--yes` to skip the question. Without a terminal to ask
+on, it doesn't publish. It also takes a local folder, for example
+`python scripts/run_repo.py demo/fixture_multi`.
 
 **Demo without credentials:** run the dashboard with `npm run dev` and open
 `http://localhost:5173/?mock=1` (or `?mock=partial`). This plays a scripted run
@@ -93,7 +102,7 @@ Supported: Python repos tested with pytest.
 python -m pytest
 ```
 
-76 tests. The engine and agent tests run real pytest (on Greenlit's own demo
+83 tests. The engine and agent tests run real pytest (on Greenlit's own demo
 fixtures), apply real diffs, and push real commits into a local bare git repo
 that stands in for GitHub. Only the Nemotron calls and GitHub's REST API are
 scripted. `demo/` holds the deliberately broken fixtures and is excluded from

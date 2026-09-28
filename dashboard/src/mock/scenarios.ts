@@ -1,4 +1,5 @@
 import type { GreenlitEvent, Stage, StageResult } from '@/types/events'
+import { summarize } from './changes'
 
 /** A scripted run (?mock=1 in the URL) that exercises every event type the
  * real backend emits, for building/recording the UI without credentials.
@@ -30,7 +31,7 @@ const ADD_DIFF = `--- a/calculator.py
 
 const AVG_ATTEMPT_1 = `--- a/calculator.py
 +++ b/calculator.py
-@@ -8,2 +8,2 @@
+@@ -9,2 +9,2 @@
  def average(numbers):
 -    return sum(numbers) / len(numbers) + 1
 +    return round(sum(numbers) / len(numbers) + 1)
@@ -45,7 +46,7 @@ const AVG_FIX = `--- a/calculator.py
  def add(a, b):
      return a + b
 
-@@ -8,2 +11,2 @@
+@@ -9,2 +12,2 @@
  def average(numbers):
 -    return sum(numbers) / len(numbers) + 1
 +    return statistics.fmean(numbers)
@@ -104,6 +105,20 @@ const COMBINED_PARTIAL = `--- a/calculator.py
 +    return statistics.fmean(numbers)
 `
 
+const ISSUES = [
+  { key: 'test:test_calculator.py::test_add', kind: 'test' as const, title: 'test_add fails: assert -1 == 5', location: 'test_calculator.py::test_add', severity: null },
+  { key: 'test:test_calculator.py::test_average', kind: 'test' as const, title: 'test_average fails: assert 3.0 == 2', location: 'test_calculator.py::test_average', severity: null },
+  { key: 'review:1', kind: 'review' as const, title: 'divide() crashes with ZeroDivisionError when b is 0', location: 'calculator.py:6', severity: 'medium' },
+]
+const FIX_DIFFS = [ADD_DIFF, AVG_FIX, DIVIDE_FIX]
+const BRANCH = 'greenlit/fix-20260928-101500'
+
+function mockChanges(partial: boolean) {
+  const fixed = partial ? 2 : 3
+  return summarize(ISSUES.slice(0, fixed).map((issue, i) => ({ key: issue.key, title: issue.title, location: issue.location, diff: FIX_DIFFS[i] })))
+}
+
+/** Everything up to the publish question (live), or the whole run (dry run). */
 export function buildMockRun({ repoFullName, live, partial }: MockOptions): TimedEvent[] {
   const url = `https://github.com/${repoFullName}`
   const out: TimedEvent[] = []
@@ -111,14 +126,7 @@ export function buildMockRun({ repoFullName, live, partial }: MockOptions): Time
   const log = (delay: number, text: string) => at(delay, { type: 'log_line', text })
   const stage = (delay: number, kind: 'stage_start' | 'stage_end', s: Stage, result?: StageResult) =>
     at(delay, kind === 'stage_start' ? { type: 'stage_start', stage: s } : { type: 'stage_end', stage: s, result })
-
-  const issues = [
-    { key: 'test:test_calculator.py::test_add', kind: 'test' as const, title: 'test_add fails: assert -1 == 5', location: 'test_calculator.py::test_add', severity: null },
-    { key: 'test:test_calculator.py::test_average', kind: 'test' as const, title: 'test_average fails: assert 3.0 == 2', location: 'test_calculator.py::test_average', severity: null },
-    { key: 'review:1', kind: 'review' as const, title: 'divide() crashes with ZeroDivisionError when b is 0', location: 'calculator.py:6', severity: 'medium' },
-  ]
-  const numberOf = (i: number) => (live ? 12 + i : null)
-  const ref = (i: number) => (live ? `#${12 + i}` : issues[i].key)
+  const issues = ISSUES
 
   // clone
   at(0, { type: 'status', value: 'scanning' })
@@ -133,26 +141,14 @@ export function buildMockRun({ repoFullName, live, partial }: MockOptions): Time
   log(400, 'Code review (Nemotron Ultra) over 1 file(s)')
   log(2000, 'Code review: 1 credible bug(s), 2 low-confidence finding(s) dropped')
 
-  // raise
-  at(500, { type: 'phase', value: 'raise' })
-  issues.forEach((issue, i) =>
-    at(i === 0 ? 400 : 350, {
-      type: 'issue_raised',
-      ...issue,
-      number: numberOf(i),
-      url: live ? `${url}/issues/${12 + i}` : null,
-    }),
-  )
-  log(300, live ? `Raised 3 issue(s) on ${repoFullName}` : 'Dry run: not raising issues on GitHub (no token)')
+  // issues (listed locally; nothing goes to GitHub before approval)
+  at(500, { type: 'phase', value: 'issues' })
+  issues.forEach((issue, i) => at(i === 0 ? 400 : 350, { type: 'issue_raised', ...issue, number: null, url: null }))
+  log(300, live ? 'Found 3 issue(s). Nothing goes to GitHub until you approve it.' : 'Found 3 issue(s) (dry run)')
 
   // fix
   at(600, { type: 'phase', value: 'fix' })
   at(100, { type: 'status', value: 'testing' })
-
-  const commit = (i: number, title: string, sha: string) => {
-    if (!live) return
-    at(400, { type: 'commit', key: issues[i].key, sha, message: `Fix ${ref(i)}: ${title}`, url: `${url}/commit/${sha}` })
-  }
 
   // issue 1: fixed first try
   at(500, { type: 'issue_start', key: issues[0].key, remaining: 3 })
@@ -170,7 +166,6 @@ export function buildMockRun({ repoFullName, live, partial }: MockOptions): Time
   stage(200, 'stage_start', 'evaluate')
   log(700, 'EVALUATE (Nemotron Nano): test_calculator.py::test_add passes, checking the full suite')
   stage(900, 'stage_end', 'evaluate', { status: 'PASS' })
-  commit(0, issues[0].title, 'a1f3c9e7b2d4')
   at(300, { type: 'issue_end', key: issues[0].key, status: 'fixed' })
 
   // issue 2: wrong first attempt, research, then fixed
@@ -207,7 +202,6 @@ export function buildMockRun({ repoFullName, live, partial }: MockOptions): Time
   stage(200, 'stage_start', 'evaluate')
   log(700, 'EVALUATE (Nemotron Nano): test_calculator.py::test_average passes, checking the full suite')
   stage(900, 'stage_end', 'evaluate', { status: 'PASS' })
-  commit(1, issues[1].title, 'c7d20e14f98a')
   at(300, { type: 'issue_end', key: issues[1].key, status: 'fixed' })
 
   // issue 3: code-review finding
@@ -234,18 +228,76 @@ export function buildMockRun({ repoFullName, live, partial }: MockOptions): Time
       stage(700, 'stage_end', 'evaluate', { status: 'PASS' })
     }
   }
-  if (!partial) commit(2, issues[2].title, 'e40b8a61c3f7')
   at(300, { type: 'issue_end', key: issues[2].key, status: partial ? 'unresolved' : 'fixed' })
 
-  // publish
-  at(700, { type: 'phase', value: 'publish' })
-  if (live) {
-    at(1000, { type: 'pr_opened', number: 15, url: `${url}/pull/15` })
-  } else {
-    at(600, { type: 'diff_ready', diff: partial ? COMBINED_PARTIAL : COMBINED_ALL })
-    log(200, `Dry run complete: ${partial ? 2 : 3} fix(es) verified in the sandbox, nothing pushed. Add a token to raise issues and open a pull request.`)
+  // review: the full change report, then (live) the publish question
+  const changes = mockChanges(partial)
+  at(700, { type: 'phase', value: 'review' })
+  at(200, { type: 'changes_ready', ...changes })
+  for (const fix of changes.fixes) {
+    for (const file of fix.files) {
+      log(150, `Changed ${file.path} lines ${file.lines_changed} (+${file.added} -${file.removed}): ${fix.title}`)
+    }
   }
+  at(200, { type: 'diff_ready', diff: partial ? COMBINED_PARTIAL : COMBINED_ALL })
+
+  if (live) {
+    const fixed = changes.totals.fixes
+    at(300, { type: 'status', value: 'awaiting_approval' })
+    at(100, {
+      type: 'approval_required',
+      repo: repoFullName,
+      branch: BRANCH,
+      base: 'main',
+      issues: 3,
+      fixed,
+      unresolved: 3 - fixed,
+      commits: fixed,
+      actions: [
+        `Raise 3 issue(s) on ${repoFullName}, labelled 'greenlit'`,
+        `Push ${fixed} commit(s) to a new branch ${BRANCH} (main is not touched)`,
+        `Open a pull request ${BRANCH} -> main that closes ${fixed} issue(s)`,
+        ...(partial ? ['Comment on the 1 unfixed issue(s) with what was tried'] : []),
+      ],
+      changes,
+    })
+    return out
+  }
+
+  log(400, `Dry run complete: ${partial ? 2 : 3} fix(es) verified in the sandbox, nothing pushed. Add a token to raise issues and open a pull request.`)
   at(400, { type: 'status', value: partial ? 'partial' : 'fixed' })
+  at(100, { type: 'phase', value: 'done' })
+  return out
+}
+
+/** The rest of a live run once the publish question is answered. */
+export function buildMockPublish({ repoFullName, partial }: MockOptions, approved: boolean): TimedEvent[] {
+  const url = `https://github.com/${repoFullName}`
+  const out: TimedEvent[] = []
+  const at = (delay: number, event: GreenlitEvent) => out.push({ delay, event })
+  const log = (delay: number, text: string) => at(delay, { type: 'log_line', text })
+  const fixed = partial ? 2 : 3
+  const status = partial ? 'partial' : 'fixed'
+
+  at(0, { type: 'approval', approved })
+  if (!approved) {
+    log(200, 'Publishing declined. Nothing was written to GitHub.')
+    at(300, { type: 'status', value: status })
+    at(100, { type: 'phase', value: 'done' })
+    return out
+  }
+
+  at(200, { type: 'phase', value: 'publish' })
+  at(0, { type: 'status', value: 'publishing' })
+  ISSUES.forEach((issue, i) => at(350, { type: 'issue_published', key: issue.key, number: 12 + i, url: `${url}/issues/${12 + i}` }))
+  log(200, `Raised 3 issue(s) on ${repoFullName}`)
+  const shas = ['a1f3c9e7b2d4', 'c7d20e14f98a', 'e40b8a61c3f7']
+  ISSUES.slice(0, fixed).forEach((issue, i) =>
+    at(400, { type: 'commit', key: issue.key, sha: shas[i], message: `Fix #${12 + i}: ${issue.title}`, url: `${url}/commit/${shas[i]}` }),
+  )
+  log(500, `Pushed ${fixed} commit(s) to ${BRANCH}`)
+  at(900, { type: 'pr_opened', number: 15, url: `${url}/pull/15` })
+  at(400, { type: 'status', value: status })
   at(100, { type: 'phase', value: 'done' })
   return out
 }
