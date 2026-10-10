@@ -2,6 +2,7 @@ import {
   Brain,
   CheckCircle2,
   Eye,
+  FlaskConical,
   Hammer,
   ListChecks,
   RotateCw,
@@ -23,6 +24,7 @@ export interface StageNodeData {
 
 const ICONS: Record<PipelineNodeId, typeof Eye> = {
   perceive: Eye,
+  reproduce: FlaskConical,
   plan: Brain,
   research: Search,
   act: Hammer,
@@ -58,14 +60,17 @@ export function StageNode({ data }: NodeProps<StageNodeData>) {
   return (
     <div
       className={cn(
-        'flex w-[152px] flex-col items-center gap-2 rounded-xl border-2 px-4 py-4 transition-colors duration-300',
+        'relative flex w-[152px] flex-col items-center gap-2 rounded-xl border-2 px-4 py-4 transition-all duration-300',
         status === 'skipped' && 'border-dashed opacity-50',
-        status === 'active' && !reducedMotion && 'animate-pulse-glow',
+        status === 'active' && !reducedMotion && 'signal-border animate-pulse-glow -translate-y-0.5',
       )}
       style={{
         borderColor: tone.border,
         backgroundColor: tone.bg,
         ['--glow-color' as string]: tone.border,
+        ['--signal-color' as string]: 'var(--color-amber)',
+        ['--signal-color-2' as string]: 'var(--color-done)',
+        boxShadow: status === 'done' ? `0 0 18px -6px ${tone.border}` : undefined,
       }}
     >
       <Handle type="target" position={Position.Left} id="in" style={{ opacity: 0 }} />
@@ -73,8 +78,13 @@ export function StageNode({ data }: NodeProps<StageNodeData>) {
       <Handle type="target" position={Position.Bottom} id="loop-in" style={{ opacity: 0 }} />
       <Handle type="source" position={Position.Bottom} id="loop-out" style={{ opacity: 0 }} />
 
-      <Icon size={24} style={{ color: tone.fg }} strokeWidth={2.25} />
-      <span className="text-xs font-semibold tracking-wide uppercase" style={{ color: tone.fg }}>
+      <Icon
+        size={24}
+        style={{ color: tone.fg }}
+        strokeWidth={2.25}
+        className={cn(status === 'active' && !reducedMotion && (kind === 'loop' ? 'animate-spin-slow' : 'animate-pulse'))}
+      />
+      <span className="font-[family-name:var(--font-display)] text-xs font-semibold tracking-wider uppercase" style={{ color: tone.fg }}>
         {label}
       </span>
     </div>
