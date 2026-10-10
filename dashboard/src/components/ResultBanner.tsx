@@ -13,8 +13,16 @@ interface Outcome {
 }
 
 function outcomeFor(state: DashboardState, onRestart: () => void): Outcome | null {
-  const total = state.issues.length
+  const dismissed = state.issues.filter((i) => i.status === 'dismissed').length
+  const total = state.issues.length - dismissed
   const fixed = state.issues.filter((i) => i.status === 'fixed').length
+  const proven = state.issues.filter((i) => i.proof?.status === 'reproduced' && i.status === 'fixed').length
+  const extras = [
+    proven ? `${proven} code-review bug${proven === 1 ? '' : 's'} proven with a new failing test first.` : '',
+    dismissed ? `${dismissed} finding${dismissed === 1 ? '' : 's'} dropped: couldn't be reproduced, so not raised.` : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
   const repo = state.repo?.full_name ?? 'this repo'
 
   if (state.status === 'error') {
@@ -28,7 +36,14 @@ function outcomeFor(state: DashboardState, onRestart: () => void): Outcome | nul
   }
   if (state.phase !== 'done') return null
   if (state.status === 'clean') {
-    return { tone: 'pass', icon: <CircleCheck size={20} />, title: `No issues found in ${repo}`, body: 'Every test passes and the code review came back clean.' }
+    return {
+      tone: 'pass',
+      icon: <CircleCheck size={20} />,
+      title: `No issues found in ${repo}`,
+      body: dismissed
+        ? `Every test passes. Code review flagged ${dismissed} possible bug${dismissed === 1 ? '' : 's'}, but Greenlit's reproduction tests passed on the current code, so nothing was raised.`
+        : 'Every test passes and the code review came back clean.',
+    }
   }
   if (state.pr) {
     return {
@@ -37,7 +52,7 @@ function outcomeFor(state: DashboardState, onRestart: () => void): Outcome | nul
       title: `Pull request #${state.pr.number} is ready for review`,
       body: `${fixed} of ${total} issue${total === 1 ? '' : 's'} fixed, each verified by the test suite in a sandbox.${
         fixed < total ? ' Greenlit commented on the rest with what it tried.' : ''
-      }`,
+      } ${extras}`.trim(),
       action: { label: 'Open pull request', href: state.pr.url },
     }
   }
@@ -46,7 +61,7 @@ function outcomeFor(state: DashboardState, onRestart: () => void): Outcome | nul
       tone: 'neutral',
       icon: <Info size={20} />,
       title: `Not published: ${fixed} of ${total} fixes verified`,
-      body: 'You chose not to publish, so nothing was written to GitHub. The verified changes are on the right.',
+      body: `You chose not to publish, so nothing was written to GitHub. The verified changes are on the right. ${extras}`.trim(),
       action: { label: 'New scan', onClick: onRestart },
     }
   }
@@ -55,7 +70,7 @@ function outcomeFor(state: DashboardState, onRestart: () => void): Outcome | nul
       tone: 'neutral',
       icon: <Info size={20} />,
       title: `Dry run finished: ${fixed} of ${total} fixes verified`,
-      body: 'Nothing was pushed. The verified changes are on the right. Add a token to raise these as issues and open a pull request.',
+      body: `Nothing was pushed. The verified changes are on the right. Add a token to raise these as issues and open a pull request. ${extras}`.trim(),
     }
   }
   return {
