@@ -3,7 +3,7 @@ LocalSandbox), real output parsing. Only the Nemotron calls are scripted."""
 from unittest.mock import patch
 
 import pytest
-from conftest import FakePlanner, LocalSandbox, fake_evaluator, make_diff, plan
+from conftest import FakePlanner, FakeTestWriter, LocalSandbox, fake_evaluator, fake_repro_judge, make_diff, plan
 
 from greenlit.issues import Issue
 from greenlit.orchestrator import FixEngine
@@ -23,7 +23,7 @@ def _test_issue(test_id: str) -> Issue:
     return Issue(key=f"test:{test_id}", kind="test", title=f"Failing test: {test_id}", test_id=test_id)
 
 
-def _run_fix(repo, issue, planner, *, max_iterations=3, research=None):
+def _run_fix(repo, issue, planner, *, max_iterations=3, research=None, writer=None):
     events = []
     sandbox = LocalSandbox()
     engine = FixEngine(sandbox, repo, None, TEST_COMMAND, emit=lambda t, p: events.append((t, p)), max_iterations=max_iterations)
@@ -32,6 +32,8 @@ def _run_fix(repo, issue, planner, *, max_iterations=3, research=None):
         patch("greenlit.orchestrator.call_planner", planner),
         patch("greenlit.orchestrator.call_evaluator", fake_evaluator),
         patch("greenlit.orchestrator.research", research or (lambda q: None)),
+        patch("greenlit.orchestrator.call_test_writer", writer or FakeTestWriter()),
+        patch("greenlit.orchestrator.call_repro_judge", fake_repro_judge),
     ):
         result = engine.fix(issue, baseline)
     return result, events, baseline
@@ -52,7 +54,7 @@ def test_failing_test_fixed_first_try(copy_fixture):
     assert "assert add(2, 3) == 5" in planner.calls[0]["stack_trace"]
     assert set(planner.calls[0]["source_files"]) == {"calculator.py", "test_calculator.py"}
     stages = [p["stage"] for t, p in events if t == "stage_start"]
-    assert stages == ["perceive", "plan", "act", "evaluate"]
+    assert stages == ["perceive", "reproduce", "plan", "act", "evaluate"]
 
 
 def test_diff_that_does_not_apply_is_retried_not_fatal(copy_fixture):
@@ -171,4 +173,65 @@ def test_unfamiliar_api_triggers_research_then_replans(copy_fixture):
     assert queries == ["python operator docs"]
     assert planner.calls[1]["research_context"] == "DOCS: use + for addition"
     stages = [p["stage"] for t, p in events if t == "stage_start"]
-    assert stages == ["perceive", "plan", "research", "plan", "act", "evaluate"]
+    assert stages == ["perceive", "reproduce", "plan", "research", "plan", "act", "evaluate"]
+
+
+CLAMP_REPRO = "from limits import clamp\n\n\ndef test_clamp_respects_upper_bound():\n    assert clamp(50, 0, 10) == 10\n"
+CLAMP_NOT_A_BUG = "from limits import clamp\n\n\ndef test_clamp_low():\n    assert clamp(-1, 0, 10) == 0\n"
+
+
+def test_review_bug_is_proven_by_a_failing_test_before_it_is_fixed(review_repo):
+    text = (review_repo / "limits.py").read_text()
+    fix = make_diff("limits.py", text, text.replace("max(lo, x)", "min(hi, max(lo, x))"))
+    planner = FakePlanner({"clamp ignores": [plan(fix)]})
+    writer = FakeTestWriter({"clamp ignores": [CLAMP_REPRO]})
+
+    result, events, _ = _run_fix(review_repo, _review_issue(), planner, writer=writer)
+
+    assert result.status == "fixed"
+    assert result.proof.status == "reproduced" and result.proof.test_path == "test_greenlit_review_1.py"
+    assert "assert 50 == 10" in result.proof.output
+    # The test ships with the fix, and the planner saw it fail.
+    assert (review_repo / "test_greenlit_review_1.py").read_text() == CLAMP_REPRO
+    assert set(result.changed_files) == {"limits.py", "test_greenlit_review_1.py"}
+    assert planner.calls[0]["reproduction_test"]["code"] == CLAMP_REPRO
+    # It was written next to the existing tests, imitating them.
+    assert writer.calls[0]["example_test"]["path"] == "test_limits.py"
+    assert ("stage_end", {"stage": "reproduce", "result": {"status": "REPRODUCED"}}) in events
+
+
+def test_fix_must_make_the_reproduction_test_pass(review_repo):
+    text = (review_repo / "limits.py").read_text()
+    compiles_but_wrong = make_diff("limits.py", text, text.replace("max(lo, x)", "max(lo, x) if x < 100 else hi"))
+    planner = FakePlanner({"clamp ignores": [plan(compiles_but_wrong)]})
+    writer = FakeTestWriter({"clamp ignores": [CLAMP_REPRO]})
+
+    result, _, _ = _run_fix(review_repo, _review_issue(), planner, writer=writer, max_iterations=1)
+
+    # Under the old compile-only rule this would have been accepted.
+    assert result.status == "unresolved"
+    assert not (review_repo / "test_greenlit_review_1.py").exists()
+
+
+def test_finding_whose_tests_pass_today_is_dismissed_without_a_fix(review_repo):
+    planner = FakePlanner({})
+    writer = FakeTestWriter({"clamp ignores": [CLAMP_NOT_A_BUG]})
+
+    result, events, _ = _run_fix(review_repo, _review_issue(), planner, writer=writer)
+
+    assert result.status == "dismissed" and result.proof.status == "not_reproduced"
+    assert planner.calls == []  # never spent a planning call on it
+    assert len(writer.calls) == 2 and "PASSED on the current code" in writer.calls[1]["prior_attempt"]
+    assert (review_repo / "limits.py").read_text() == "def clamp(x, lo, hi):\n    return max(lo, x)\n"
+
+
+def test_broken_reproduction_test_gets_feedback_and_a_retry(review_repo):
+    text = (review_repo / "limits.py").read_text()
+    fix = make_diff("limits.py", text, text.replace("max(lo, x)", "min(hi, max(lo, x))"))
+    planner = FakePlanner({"clamp ignores": [plan(fix)]})
+    writer = FakeTestWriter({"clamp ignores": ["from limits import clamp_typo\n\ndef test_x():\n    pass\n", CLAMP_REPRO]})
+
+    result, _, _ = _run_fix(review_repo, _review_issue(), planner, writer=writer)
+
+    assert result.status == "fixed" and result.proof.status == "reproduced"
+    assert "didn't run cleanly" in writer.calls[1]["prior_attempt"]
