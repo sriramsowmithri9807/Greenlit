@@ -16,6 +16,7 @@ import difflib
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -67,14 +68,49 @@ class FakePlanner:
     def __init__(self, scripts: dict[str, list[dict]]):
         self.scripts = {key: list(plans) for key, plans in scripts.items()}
         self.calls: list[dict] = []
+        self._lock = threading.Lock()  # parallel fixes call it from several threads
 
     def __call__(self, context: dict) -> dict:
-        self.calls.append(context)
-        rendered = f"{context.get('stack_trace', '')}\n{context.get('issue', '')}"
-        for key, plans in self.scripts.items():
-            if key in rendered and plans:
-                return plans.pop(0) if len(plans) > 1 else plans[0]
+        with self._lock:
+            self.calls.append(context)
+            rendered = f"{context.get('stack_trace', '')}\n{context.get('issue', '')}"
+            for key, plans in self.scripts.items():
+                if key in rendered and plans:
+                    return plans.pop(0) if len(plans) > 1 else plans[0]
         raise AssertionError(f"FakePlanner has no script for: {rendered[:300]}")
+
+
+BROKEN_TEST = "import greenlit_no_such_module\n\n\ndef test_x():\n    pass\n"
+
+
+class FakeTestWriter:
+    """The REPRODUCE step's test writer. `scripts` maps a substring of the
+    issue title to the test files to return, in order (the last repeats).
+    Issues with no script get a test that can't even import, which makes
+    the engine fall back to "unproven" (compile + no-regression) checks."""
+
+    def __init__(self, scripts: dict[str, list[str]] | None = None):
+        self.scripts = {key: list(codes) for key, codes in (scripts or {}).items()}
+        self.calls: list[dict] = []
+        self._lock = threading.Lock()
+
+    def __call__(self, context: dict) -> dict:
+        with self._lock:
+            self.calls.append(context)
+            title = context.get("issue", {}).get("title", "")
+            for key, codes in self.scripts.items():
+                if key in title and codes:
+                    code = codes.pop(0) if len(codes) > 1 else codes[0]
+                    return {"test_code": code, "explanation": "scripted"}
+        return {"test_code": BROKEN_TEST, "explanation": "unscripted"}
+
+
+def fake_repro_judge(issue: dict, test_code: str, test_output: str) -> dict:
+    """Mirrors the rule in the real judge prompt."""
+    for marker in ("ImportError", "ModuleNotFoundError", "NameError", "SyntaxError"):
+        if marker in test_output:
+            return {"verdict": "TEST_IS_BROKEN", "reason": marker}
+    return {"verdict": "REPRODUCES_BUG", "reason": "fails the way the issue describes"}
 
 
 def fake_evaluator(test_stdout: str, test_stderr: str, exit_code: int, prior_error: str | None) -> dict:
