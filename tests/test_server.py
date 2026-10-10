@@ -62,7 +62,7 @@ def test_start_rejects_non_github_urls_including_local_paths(client, url):
 def test_events_stream_in_order_and_end(client, monkeypatch):
     seen_args = {}
 
-    def fake_agent(repo_url, token, *, include_review, emit, approve):
+    def fake_agent(repo_url, token, *, include_review, emit, approve, parallel):
         seen_args.update(repo_url=repo_url, token=token, include_review=include_review)
         emit("phase", {"value": "clone"})
         emit("log_line", {"text": "hello"})
@@ -85,7 +85,7 @@ def test_events_stream_in_order_and_end(client, monkeypatch):
 
 
 def test_reconnect_resumes_after_last_event_id(client, monkeypatch):
-    def fake_agent(repo_url, token, *, include_review, emit, approve):
+    def fake_agent(repo_url, token, *, include_review, emit, approve, parallel):
         for i in range(5):
             emit("log_line", {"text": f"line {i}"})
 
@@ -118,7 +118,7 @@ def test_concurrent_run_limit(client, monkeypatch):
 def test_run_waits_for_approval_and_only_publishes_on_yes(client, monkeypatch):
     answers = []
 
-    def fake_agent(repo_url, token, *, include_review, emit, approve):
+    def fake_agent(repo_url, token, *, include_review, emit, approve, parallel):
         emit("approval_required", {"actions": ["Open a pull request"]})
         answers.append(approve({"actions": ["Open a pull request"]}))
 
@@ -144,3 +144,10 @@ def test_unanswered_approval_times_out_as_no():
     assert run.wait_for_approval({}, timeout=0.01) is False
     assert "nothing was published" in run.events[-1][1]["text"]
     assert run.answer(True) is False
+
+
+def test_benchmark_endpoint_serves_the_latest_summary(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "BENCHMARK_RESULTS", tmp_path / "latest.json")
+    assert client.get("/api/benchmark").status_code == 404
+    (tmp_path / "latest.json").write_text(json.dumps({"benchmark": "b", "finished_at": "t", "summary": {"resolved": 3}, "tasks": [1]}))
+    assert client.get("/api/benchmark").json() == {"benchmark": "b", "finished_at": "t", "summary": {"resolved": 3}}
