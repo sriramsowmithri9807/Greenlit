@@ -5,7 +5,7 @@ export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
   return (
     <div
       className={cn(
-        'rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-[0_1px_0_0_rgba(255,255,255,0.03)_inset]',
+        'hud rounded-xl border border-[var(--color-border)] shadow-[0_1px_0_0_rgba(255,255,255,0.04)_inset,0_20px_40px_-20px_rgba(0,0,0,0.6)]',
         className,
       )}
       {...props}
@@ -25,11 +25,17 @@ export function CardHeader({ className, ...props }: HTMLAttributes<HTMLDivElemen
   )
 }
 
-export function CardTitle({ className, ...props }: HTMLAttributes<HTMLHeadingElement>) {
+export function CardTitle({ className, children, ...props }: HTMLAttributes<HTMLHeadingElement>) {
   return (
     <h2
-      className={cn('text-xs font-semibold tracking-widest text-[var(--color-fg-muted)] uppercase', className)}
+      className={cn(
+        'flex items-center gap-2 font-[family-name:var(--font-display)] text-xs font-semibold tracking-widest text-[var(--color-fg-muted)] uppercase',
+        className,
+      )}
       {...props}
-    />
+    >
+      <span aria-hidden className="h-1.5 w-1.5 shrink-0 rotate-45 bg-[var(--color-pass)] shadow-[0_0_8px_rgba(34,197,94,0.8)]" />
+      <span className="min-w-0 truncate">{children}</span>
+    </h2>
   )
 }
