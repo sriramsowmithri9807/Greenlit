@@ -10,12 +10,29 @@ Built for the Nebius x NVIDIA Global AI Hackathon (Coding & Agentic
 Engineering track).
 
 ```
-repo URL ─► clone ─► scan ─────────────► issues ─► fix each issue ───────────► review ─────────► publish
-                     ├ test suite                   PERCEIVE → PLAN → [RESEARCH]   files, lines,   (only on yes)
-                     │ (Nebius sandbox)             → ACT → EVALUATE → retry       code; ask to    issues, commits,
-                     └ code review                                                 raise the PR    push, PR
-                       (Nemotron 3 Ultra)
+repo URL ─► clone ─► scan ──────────► issues ─► fix, in parallel ─────────────► merge ──► review ───────► publish
+                     ├ test suite              one Nebius sandbox per issue:   combine,  files, lines,  (only on yes)
+                     │ (Nebius sandbox)        PERCEIVE → PROVE BUG → PLAN     re-verify code; ask to   issues, commits,
+                     └ code review             → [RESEARCH] → ACT → EVALUATE   the suite raise the PR   push, PR
+                       (Nemotron 3 Ultra)      → retry
 ```
+
+Three things set it apart:
+
+- **Proven bugs, not guesses.** A bug found by AI code review isn't fixed on
+  the model's say-so. Nemotron Ultra first writes a test that reproduces it,
+  which must fail on the current code in the sandbox, and Nemotron Nano checks
+  it fails *because of the bug* (not an import error in the test). Then the
+  fix must make that test pass, and the test ships in the PR so the bug can't
+  come back. A finding whose tests keep passing on today's code is dropped as
+  a false positive and never raised.
+- **Parallel sandboxes.** Every issue is fixed at the same time in its own
+  Nebius sandbox. The verified fixes are merged and the whole suite re-run on
+  the result. Fixes that conflict or interact are merged one at a time instead,
+  and re-fixed on top of each other if needed.
+- **Visible cost tiering.** Every Nemotron call is metered. The dashboard shows
+  spend per model and per issue, live, and how much routing the frequent
+  checks to Nano saved compared with running everything on Ultra.
 
 ## What makes a fix "verified"
 
@@ -27,8 +44,10 @@ Factory sandbox. It's only committed if:
   weakens a test to make it pass,
 - for a failing-test issue, that test now passes, **and** the full suite has no
   failure that wasn't there before,
-- for a code-review issue, it edits the reported file, compiles, and the full
-  suite has no new failures.
+- for a code-review issue, it edits the reported file, the reproduction test
+  written for it now passes, and the full suite has no new failures. (If no
+  working reproduction test could be written, the fix must compile and break
+  nothing, and the PR flags it for a closer look.)
 
 A diff that fails any check goes back to the planner as a failed attempt, with
 the reason, so the next attempt is different. After the retry budget, the
@@ -39,10 +58,11 @@ issue gets a comment explaining what was tried.
 | Requirement | Where |
 |---|---|
 | **NVIDIA Nemotron via Nebius Token Factory**, tiered by cost | [greenlit/llm_client.py](greenlit/llm_client.py) |
-| Nemotron 3 Ultra (`nvidia/Nemotron-3-Ultra-550b-a55b`) for the expensive reasoning: code review and fix planning | `call_reviewer`, `call_planner` |
-| Nemotron 3 Nano (`nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B`) for the cheap, frequent call: classifying each sandbox test run | `call_evaluator` |
+| Nemotron 3 Ultra (`nvidia/Nemotron-3-Ultra-550b-a55b`) for the expensive reasoning: code review, writing reproduction tests, fix planning | `call_reviewer`, `call_test_writer`, `call_planner` |
+| Nemotron 3 Nano (`nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B`) for the cheap, frequent calls: classifying each sandbox test run, judging reproduction tests | `call_evaluator`, `call_repro_judge` |
+| Per-call token and cost metering, split by tier | [greenlit/usage.py](greenlit/usage.py) |
 | Structured output via forced tool calling on both models (no free-text parsing) | same file |
-| **Token Factory Sandboxes**: every run of the target repo's code happens in a sandbox, never on the host | [greenlit/clients/sandbox.py](greenlit/clients/sandbox.py) |
+| **Token Factory Sandboxes**: every run of the target repo's code happens in a sandbox, never on the host; issues are fixed in parallel, one sandbox each | [greenlit/clients/sandbox.py](greenlit/clients/sandbox.py), [greenlit/parallel.py](greenlit/parallel.py) |
 | **Tavily**, called only when the planner flags an unfamiliar or version-sensitive API, then planning re-runs with the docs | [greenlit/research.py](greenlit/research.py), `FixEngine._plan` |
 
 ## Running it
@@ -78,11 +98,39 @@ owner/repo? [y/N]`. Pass `--yes` to skip the question. Without a terminal to ask
 on, it doesn't publish. It also takes a local folder, for example
 `python scripts/run_repo.py demo/fixture_multi`.
 
+Options: `--sequential` fixes one issue at a time in a single sandbox (the UI
+has the same switch); `GREENLIT_MAX_SANDBOXES` caps parallel sandboxes
+(default 4).
+
 **Demo without credentials:** run the dashboard with `npm run dev` and open
 `http://localhost:5173/?mock=1` (or `?mock=partial`). This plays a scripted run
 and is labelled as such in the UI.
 
 Supported: Python repos tested with pytest.
+
+## Cost
+
+Costs are estimated from per-token prices: by default Ultra $1.00 in / $3.00
+out and Nano $0.06 / $0.24 per million tokens, taken from public price
+listings rather than Nebius's own page. Confirm them in your Token Factory
+console and override with `GREENLIT_PRICE_ULTRA="<in>,<out>"` and
+`GREENLIT_PRICE_NANO`. The UI marks every figure "est.".
+
+## Benchmark
+
+```bash
+python scripts/benchmark.py --limit 25
+```
+
+Runs Greenlit on SWE-bench Lite tasks (by default from requests, pytest,
+sympy, flask and pylint). Greenlit sees only each task's problem statement,
+like a maintainer reading a GitHub issue. It locates the code, proves the bug
+with a test, then fixes and verifies it. Its patch is then graded with
+SWE-bench's hidden tests. The report gives the resolve rate, the false-fix
+rate (fixes Greenlit claimed that the hidden tests reject), and time and cost
+per task. It's written to `bench/results/` (`REPORT.md`, `latest.json`), and
+the dashboard's start page shows the latest result. No result is shown until
+a real run has produced one.
 
 ## Safety
 
@@ -102,7 +150,7 @@ Supported: Python repos tested with pytest.
 python -m pytest
 ```
 
-83 tests. The engine and agent tests run real pytest (on Greenlit's own demo
+102 tests. The engine, agent and benchmark tests run real pytest (on Greenlit's own demo
 fixtures), apply real diffs, and push real commits into a local bare git repo
 that stands in for GitHub. Only the Nemotron calls and GitHub's REST API are
 scripted. `demo/` holds the deliberately broken fixtures and is excluded from
@@ -111,10 +159,11 @@ collection.
 ## Status
 
 Everything above is tested offline. It has **not** yet been run against live
-Nemotron models or a live Nebius sandbox: `scripts/verify_stack.py` is the
-first thing to run once credentials are available. The open questions it
-answers are whether the model IDs above exist in the account's catalog and
-whether the sandbox has network access for `pip install`.
+Nemotron models or a live Nebius sandbox, and the benchmark has no results
+yet: `scripts/verify_stack.py` is the first thing to run once credentials are
+available. The open questions it answers are whether the model IDs above exist
+in the account's catalog and whether the sandbox has network access for
+`pip install`.
 
 ## License
 
