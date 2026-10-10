@@ -32,7 +32,7 @@ from greenlit import usage
 from greenlit.clients.sandbox import Sandbox
 from greenlit.issues import Issue
 from greenlit.locate import locate, nearby_tests
-from greenlit.orchestrator import DEFAULT_MAX_ITERATIONS, FixEngine
+from greenlit.orchestrator import DEFAULT_MAX_ITERATIONS, FixEngine, test_timeout_from_env
 from greenlit.project import detect
 
 SWE_BENCH_LITE = "princeton-nlp/SWE-bench_Lite"
@@ -167,7 +167,8 @@ def evaluate(task: Task, repo: Path, sandbox: Sandbox, install_command: str) -> 
     _apply_patch(repo, task.test_patch)
     named = {t.split("::")[0] for t in task.fail_to_pass + task.pass_to_pass if "::" in t and t.split("::")[0].endswith(".py")}
     files = " ".join(shlex.quote(f) for f in sorted(set(patch_files(task.test_patch)) | named))
-    run = sandbox.run_tests(repo, f"{install_command} && {EVAL_COMMAND} {files}")
+    timed = f"timeout -k 10 {test_timeout_from_env()} {EVAL_COMMAND}"
+    run = sandbox.run_tests(repo, f"{install_command} && {timed} {files}")
     results = parse_results(f"{run.stdout}\n{run.stderr}")
     f2p = {t: _outcome(results, t) for t in task.fail_to_pass}
     p2p = {t: _outcome(results, t) for t in task.pass_to_pass}
