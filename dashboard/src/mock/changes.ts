@@ -11,7 +11,7 @@ export function parseDiff(diff: string): ChangedFile[] {
   for (const raw of diff.split('\n')) {
     const header = raw.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/)
     if (raw.startsWith('--- ')) {
-      file = { path: '', status: 'modified', added: 0, removed: 0, lines_changed: '', hunks: [] }
+      file = { path: '', status: raw === '--- /dev/null' ? 'added' : 'modified', added: 0, removed: 0, lines_changed: '', hunks: [] }
       files.push(file)
       hunk = null
     } else if (!file) {
