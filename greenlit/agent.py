@@ -315,9 +315,15 @@ def run_agent(
         )
         emit("log_line", {"text": "Running the test suite in a Nebius Token Factory sandbox"})
         baseline = engine.run_suite()
-        if not baseline.ran:
+        if not baseline.completed:
+            # Every fix is judged against this run, so it has to be a whole one.
+            if baseline.timed_out:
+                raise AgentError(
+                    f"The repo's own test suite didn't finish within {engine.test_timeout}s in the sandbox, so there's "
+                    "no baseline to verify fixes against. Raise GREENLIT_TEST_TIMEOUT if the suite is just slow."
+                )
             tail = "\n".join(baseline.output.strip().splitlines()[-15:])
-            raise AgentError(f"The test suite didn't run in the sandbox (the install step may have failed). Last output:\n{tail}")
+            raise AgentError(f"The test suite didn't run to completion in the sandbox (the install step may have failed). Last output:\n{tail}")
 
         if baseline.no_tests:
             emit("log_line", {"text": "No tests found, relying on code review"})
