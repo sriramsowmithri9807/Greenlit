@@ -12,6 +12,7 @@ export interface StartInput {
   repoUrl: string
   token: string
   includeReview: boolean
+  parallel: boolean
 }
 
 export type Health =
@@ -56,7 +57,7 @@ export function useRun() {
   useEffect(() => stopStreams, [stopStreams])
 
   const start = useCallback(
-    async ({ repoUrl, token, includeReview }: StartInput) => {
+    async ({ repoUrl, token, includeReview, parallel }: StartInput) => {
       stopStreams()
       setStartError(null)
       dispatch({ type: 'reset' })
@@ -75,7 +76,7 @@ export function useRun() {
         const response = await fetch('/api/runs', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ repo_url: repoUrl, token: token.trim() || null, include_review: includeReview }),
+          body: JSON.stringify({ repo_url: repoUrl, token: token.trim() || null, include_review: includeReview, parallel }),
         })
         const body = await response.json().catch(() => ({}))
         if (!response.ok) {
