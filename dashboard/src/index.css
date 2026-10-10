@@ -5,11 +5,13 @@
     "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono:
     "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --font-display:
+    "Space Grotesk", "Inter", ui-sans-serif, system-ui, sans-serif;
 
-  --color-bg: #0a0d10;
-  --color-surface: #10151a;
-  --color-surface-raised: #161c23;
-  --color-border: #232b33;
+  --color-bg: #06090b;
+  --color-surface: #0d1216;
+  --color-surface-raised: #141b21;
+  --color-border: #1f2a31;
   --color-fg: #e6edf3;
   --color-fg-muted: #8b98a5;
 
@@ -21,6 +23,10 @@
   --color-done: #22d3ee;
 
   --animate-pulse-glow: pulse-glow 1.6s ease-in-out infinite;
+  --animate-blink: blink 1.05s steps(1) infinite;
+  --animate-shimmer: shimmer 3.2s linear infinite;
+  --animate-beam: beam 1.8s ease-in-out infinite;
+  --animate-spin-slow: spin 3.5s linear infinite;
 }
 
 @keyframes pulse-glow {
@@ -33,6 +39,49 @@
   }
 }
 
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@keyframes shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* A light sweeping across whatever is being worked on. */
+@keyframes beam {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+
+@keyframes scanline {
+  0% {
+    transform: translateY(-10vh);
+  }
+  100% {
+    transform: translateY(110vh);
+  }
+}
+
+@keyframes border-angle {
+  to {
+    --angle: 360deg;
+  }
+}
+
+@property --angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
 html,
 body,
 #root {
@@ -43,6 +92,11 @@ body {
   background-color: var(--color-bg);
   color: var(--color-fg);
   font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--color-pass) 35%, transparent);
 }
 
 ::-webkit-scrollbar {
@@ -57,6 +111,117 @@ body {
 ::-webkit-scrollbar-thumb {
   background-color: var(--color-border);
   border-radius: 9999px;
+}
+
+/* Wordmark / headline text with a slow light running through it. */
+.text-signal {
+  background: linear-gradient(
+    100deg,
+    var(--color-pass) 0%,
+    #86efac 22%,
+    var(--color-done) 45%,
+    var(--color-pass) 70%,
+    #86efac 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: var(--animate-shimmer);
+}
+
+/* Glass panel with HUD corner brackets. */
+.hud {
+  position: relative;
+  background: color-mix(in oklab, var(--color-surface) 78%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.hud::before,
+.hud::after {
+  content: "";
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  pointer-events: none;
+  border-color: color-mix(in oklab, var(--hud-accent, var(--color-pass)) 70%, transparent);
+  border-style: solid;
+  z-index: 1;
+}
+
+.hud::before {
+  top: 0;
+  left: 0;
+  border-width: 2px 0 0 2px;
+  border-top-left-radius: 12px;
+}
+
+.hud::after {
+  right: 0;
+  bottom: 0;
+  border-width: 0 2px 2px 0;
+  border-bottom-right-radius: 12px;
+}
+
+/* An animated gradient border that runs around the element. */
+.signal-border {
+  position: relative;
+  isolation: isolate;
+}
+
+.signal-border::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: conic-gradient(
+    from var(--angle),
+    transparent 0%,
+    var(--signal-color, var(--color-pass)) 12%,
+    transparent 30%,
+    transparent 55%,
+    var(--signal-color-2, var(--color-done)) 68%,
+    transparent 85%
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: border-angle 4s linear infinite;
+  pointer-events: none;
+  z-index: -1;
+}
+
+/* Button sheen. */
+.sheen {
+  position: relative;
+  overflow: hidden;
+}
+
+.sheen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+  transform: translateX(-120%);
+  animation: beam 2.8s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.sheen:disabled::after {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .text-signal,
+  .signal-border::before,
+  .sheen::after {
+    animation: none;
+  }
 }
 
 /* React Flow dark theme overrides, scoped so we don't fight its defaults */
