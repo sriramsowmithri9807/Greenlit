@@ -43,7 +43,7 @@ export function PhaseStepper({ phase, status, dryRun }: { phase: Phase | null; s
           <li key={step.phase} className="flex min-w-0 flex-1 items-center gap-2">
             <motion.span
               className={cn(
-                'flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 text-[11px] font-semibold',
+                'relative flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 font-mono text-[11px] font-semibold',
                 state === 'active' && !reducedMotion && 'animate-pulse-glow',
               )}
               style={{ ['--glow-color' as string]: color }}
@@ -55,10 +55,16 @@ export function PhaseStepper({ phase, status, dryRun }: { phase: Phase | null; s
               transition={reducedMotion ? { duration: 0 } : { duration: 0.35 }}
             >
               {state === 'done' ? <Check size={13} strokeWidth={3} /> : state === 'failed' ? <X size={13} strokeWidth={3} /> : index + 1}
+              {state === 'active' && !reducedMotion && (
+                <span
+                  aria-hidden
+                  className="absolute -inset-[5px] animate-spin-slow rounded-full border-2 border-transparent border-t-[var(--color-amber)] border-r-[var(--color-amber)]/40"
+                />
+              )}
             </motion.span>
             <span
               className={cn(
-                'truncate text-xs font-medium tracking-wide whitespace-nowrap uppercase transition-colors',
+                'truncate font-[family-name:var(--font-display)] text-xs font-semibold tracking-wider whitespace-nowrap uppercase transition-colors',
                 state === 'pending' ? 'text-[var(--color-fg-muted)]' : 'text-[var(--color-fg)]',
               )}
             >
@@ -72,6 +78,12 @@ export function PhaseStepper({ phase, status, dryRun }: { phase: Phase | null; s
                   animate={{ width: state === 'done' ? '100%' : '0%' }}
                   transition={reducedMotion ? { duration: 0 } : { duration: 0.5, ease: 'easeOut' }}
                 />
+                {/* A comet running towards the next step while this one works. */}
+                {state === 'active' && !reducedMotion && (
+                  <span aria-hidden className="absolute inset-0 overflow-hidden">
+                    <span className="absolute -top-px h-[3px] w-1/3 animate-beam rounded-full bg-gradient-to-r from-transparent via-[var(--color-amber)] to-transparent" />
+                  </span>
+                )}
               </span>
             )}
           </li>
