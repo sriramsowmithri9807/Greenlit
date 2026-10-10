@@ -1,12 +1,12 @@
 import { motion } from 'framer-motion'
 import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion'
 
-export function IterationCounter({ count }: { count: number }) {
+export function IterationCounter({ count, label = 'Iteration' }: { count: number; label?: string }) {
   const reducedMotion = usePrefersReducedMotion()
 
   return (
     <div className="flex items-center gap-2 text-sm text-[var(--color-fg-muted)]">
-      <span className="tracking-wide uppercase">Iteration</span>
+      <span className="tracking-wide uppercase">{label}</span>
       <motion.span
         key={count}
         className="inline-flex min-w-[1.5ch] justify-center rounded-md bg-[var(--color-surface-raised)] px-2 py-0.5 font-mono text-base font-semibold text-[var(--color-fg)] tabular-nums"
