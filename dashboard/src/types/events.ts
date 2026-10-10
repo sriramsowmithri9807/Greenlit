@@ -1,6 +1,6 @@
 /** Mirrors what greenlit/agent.py and greenlit/orchestrator.py emit. */
 
-export type Stage = 'perceive' | 'plan' | 'research' | 'act' | 'evaluate'
+export type Stage = 'perceive' | 'reproduce' | 'plan' | 'research' | 'act' | 'evaluate'
 
 export type RunStatus =
   | 'idle'
@@ -16,7 +16,7 @@ export type RunStatus =
 
 export type Phase = 'clone' | 'scan' | 'issues' | 'fix' | 'review' | 'publish' | 'done'
 
-export type IssueKind = 'test' | 'review'
+export type IssueKind = 'test' | 'review' | 'report'
 
 export interface StageResult {
   unfamiliar_api?: boolean
@@ -61,6 +61,40 @@ export interface PublishRequest {
   changes: Changes
 }
 
+/** Whether a code-review finding was proven by a failing test. */
+export interface Proof {
+  key: string
+  status: 'reproduced' | 'not_reproduced' | 'unproven'
+  test_path: string | null
+  test_code: string | null
+  output: string
+  reason: string
+}
+
+export type Tier = 'ultra' | 'nano'
+
+/** One Nemotron call (greenlit/usage.py). */
+export interface UsageEvent {
+  role: 'plan' | 'review' | 'evaluate' | 'write_test' | 'judge_test'
+  model: string
+  tier: Tier
+  prompt_tokens: number
+  completion_tokens: number
+  latency_ms: number
+  cost_usd: number
+  ultra_cost_usd: number
+  key: string | null
+}
+
+export interface TierTotals {
+  calls: number
+  prompt_tokens: number
+  completion_tokens: number
+  cost_usd: number
+}
+
+export type LaneEventType = 'stage_start' | 'stage_end' | 'iteration' | 'diff_ready' | 'log_line' | 'proof'
+
 export interface GreenlitEventMap {
   status: { value: RunStatus }
   phase: { value: Phase }
@@ -75,7 +109,7 @@ export interface GreenlitEventMap {
     url: string | null
   }
   issue_start: { key: string; remaining: number }
-  issue_end: { key: string; status: 'fixed' | 'unresolved' }
+  issue_end: { key: string; status: 'fixed' | 'unresolved' | 'dismissed' }
   stage_start: { stage: Stage }
   stage_end: { stage: Stage; result?: StageResult }
   iteration: { count: number }
@@ -88,6 +122,15 @@ export interface GreenlitEventMap {
   commit: { key: string; sha: string; message: string; url: string | null }
   pr_opened: { number: number; url: string }
   run_error: { message: string }
+  proof: Proof
+  usage: UsageEvent
+  cost_summary: { ultra: TierTotals; nano: TierTotals; total_usd: number; ultra_only_usd: number; savings_pct: number }
+  race_start: { sandboxes: number; lanes: { key: string; title: string; sandbox: number }[] }
+  lane: { key: string; event: LaneEventType; data: Record<string, unknown> }
+  lane_end: { key: string; status: 'fixed' | 'unresolved' | 'dismissed'; seconds: number; iterations: number }
+  race_end: { sandboxes: number; seconds: number; sequential_seconds: number }
+  merge_start: { fixes: number }
+  merge_end: { clean: boolean }
 }
 
 export type GreenlitEventType = keyof GreenlitEventMap
@@ -115,4 +158,13 @@ export const EVENT_TYPES = [
   'commit',
   'pr_opened',
   'run_error',
+  'proof',
+  'usage',
+  'cost_summary',
+  'race_start',
+  'lane',
+  'lane_end',
+  'race_end',
+  'merge_start',
+  'merge_end',
 ] as const satisfies readonly GreenlitEventType[]
