@@ -15,6 +15,9 @@ Every candidate diff is applied to a throwaway copy and run inside the
 Sandbox; a fix is accepted only if
 
 - it applies cleanly and touches only paths inside the repo,
+- every test run it's judged on actually finished: a run that times out,
+  crashes or ends the process before pytest reports is a rejection, never
+  a silent "no failures",
 - it doesn't edit test files (fix the code under test, don't weaken the test),
 - for a failing-test issue: that test now passes (classified by Nemotron Nano)
   AND the full suite has no failures that weren't there before,
@@ -32,6 +35,7 @@ injected `emit(event_type, payload)` callback.
 """
 from __future__ import annotations
 
+import os
 import shlex
 import shutil
 import subprocess
@@ -51,6 +55,8 @@ from greenlit.research import research
 Emit = Callable[[str, dict], None]
 
 DEFAULT_MAX_ITERATIONS = 3
+DEFAULT_TEST_TIMEOUT = 600  # seconds per test run, override with GREENLIT_TEST_TIMEOUT
+_KILL_GRACE_SECONDS = 10
 REPRO_ATTEMPTS = 2
 _MAX_EXAMPLE_TEST_CHARS = 3000
 _COMPILE_FAILED_EXIT = 97
@@ -123,6 +129,13 @@ def apply_diff(target_dir: Path, diff: str) -> list[str]:
             return paths
         last_error = proc.stderr.strip()
     raise DiffError(f"diff did not apply: {last_error}")
+
+
+def test_timeout_from_env() -> int:
+    try:
+        return max(1, int(os.environ.get("GREENLIT_TEST_TIMEOUT", DEFAULT_TEST_TIMEOUT)))
+    except ValueError:
+        return DEFAULT_TEST_TIMEOUT
 
 
 def _scratch_copy(repo_dir: Path) -> Path:
@@ -200,10 +213,16 @@ class FixEngine:
         emit: Emit = _noop_emit,
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
         suite_targets: list[str] | None = None,
+        test_timeout: int | None = None,
     ):
         """`suite_targets` narrows "the full suite" to these test paths, for
-        repos whose whole suite is too slow to run on every attempt."""
+        repos whose whole suite is too slow to run on every attempt.
+
+        `test_timeout` caps each pytest run inside the sandbox, in seconds
+        (default GREENLIT_TEST_TIMEOUT, else 600), so a fix that loops
+        forever is stopped and rejected instead of stalling the run."""
         self.suite_targets = suite_targets
+        self.test_timeout = test_timeout or test_timeout_from_env()
         self.sandbox = sandbox
         self.working_dir = working_dir
         self.install_command = install_command
@@ -214,12 +233,24 @@ class FixEngine:
     def _cmd(self, command: str) -> str:
         return f"{self.install_command} && {command}" if self.install_command else command
 
-    def run_suite(self, directory: Path | None = None) -> SuiteRun:
+    def _timed(self, command: str) -> str:
+        """Run `command` under coreutils `timeout`: exit 124 when it's
+        stopped, 137 if it had to be killed after the grace period."""
+        return f"timeout -k {_KILL_GRACE_SECONDS} {self.test_timeout} {command}"
+
+    def _suite_command(self) -> str:
         targets = "".join(f" {shlex.quote(t)}" for t in self.suite_targets or [])
-        return run_suite(self.sandbox, directory or self.working_dir, self._cmd(f"{self.test_command}{targets}"))
+        return self._timed(f"{self.test_command}{targets}")
+
+    def run_suite(self, directory: Path | None = None) -> SuiteRun:
+        return run_suite(self.sandbox, directory or self.working_dir, self._cmd(self._suite_command()))
 
     def _scoped_command(self, target: str) -> str:
-        return self._cmd(f"{self.test_command} {shlex.quote(target)}")
+        return self._cmd(self._timed(f"{self.test_command} {shlex.quote(target)}"))
+
+    def unfinished(self, suite: SuiteRun) -> str | None:
+        """None if the run completed; otherwise why it didn't, in words."""
+        return None if suite.completed else suite.incomplete_reason(self.test_timeout)
 
     # --- PERCEIVE ---------------------------------------------------------
 
@@ -294,6 +325,15 @@ class FixEngine:
             finally:
                 shutil.rmtree(scratch, ignore_errors=True)
             output = f"{result.stdout}\n{result.stderr}"
+            suite = parse_suite_output(result.exit_code, output)
+
+            # Checked before "did it pass": a run that never finished proves
+            # nothing either way, and mustn't get a real bug dismissed.
+            unfinished = self.unfinished(suite)
+            if unfinished:
+                feedback = f"the test run didn't finish: {unfinished}"
+                self.emit("log_line", {"text": f"REPRODUCE: test run didn't finish, {unfinished.splitlines()[0]}"})
+                continue
 
             if result.exit_code == 0:
                 passed += 1
@@ -304,7 +344,6 @@ class FixEngine:
                 self.emit("log_line", {"text": f"REPRODUCE: test passed on the current code, bug not shown ({written['explanation']})"})
                 continue
 
-            suite = parse_suite_output(result.exit_code, output)
             # A bare "ERROR <file>" is a collection error: the test itself is broken.
             collected = [f for f in suite.failures if f.test_id.startswith(f"{path}::")]
             if not collected or any(f.test_id == path for f in suite.failures):
@@ -369,10 +408,21 @@ class FixEngine:
         return _Verdict(ok=False, reason=reason)
 
     def _regressions(self, suite_after: SuiteRun, baseline: SuiteRun) -> str | None:
+        # An unfinished run reports no failures at all; that's not "no
+        # regressions", it's no information.
+        unfinished = self.unfinished(suite_after)
+        if unfinished:
+            return f"the full test suite didn't finish: {unfinished}"
         new_problems = sorted(suite_after.problem_ids - baseline.problem_ids)
         if new_problems:
             return "it made previously-passing tests fail: " + ", ".join(new_problems[:5])
         return None
+
+    def _reject_after_suite(self, reason: str, suite_after: SuiteRun) -> _Verdict:
+        status = "REGRESSION" if suite_after.completed else "INCOMPLETE"
+        self.emit("log_line", {"text": f"EVALUATE: rejected, {reason.splitlines()[0]}"})
+        self.emit("stage_end", {"stage": "evaluate", "result": {"status": status}})
+        return _Verdict(ok=False, reason=reason)
 
     def _act_and_evaluate(
         self, issue: Issue, diff: str, baseline: SuiteRun, prior_error: str | None, proof: Proof | None
@@ -412,6 +462,16 @@ class FixEngine:
         self.emit("stage_end", {"stage": "act"})
 
         self.emit("stage_start", {"stage": "evaluate"})
+        # Exit code 0 alone isn't a pass: a fix that ends the process before
+        # the assertion runs exits 0 too. Rejected here, before spending a
+        # Nano call on it.
+        unfinished = self.unfinished(parse_suite_output(scoped.exit_code, f"{scoped.stdout}\n{scoped.stderr}"))
+        if unfinished:
+            reason = f"the run of {target} didn't finish: {unfinished}"
+            self.emit("log_line", {"text": f"EVALUATE: rejected, {reason.splitlines()[0]}"})
+            self.emit("stage_end", {"stage": "evaluate", "result": {"status": "INCOMPLETE"}})
+            return _Verdict(ok=False, reason=reason)
+
         verdict = call_evaluator(
             test_stdout=scoped.stdout,
             test_stderr=scoped.stderr,
@@ -427,9 +487,7 @@ class FixEngine:
         suite_after = self.run_suite(scratch)
         regression = self._regressions(suite_after, baseline)
         if regression:
-            self.emit("log_line", {"text": f"EVALUATE: rejected, {regression}"})
-            self.emit("stage_end", {"stage": "evaluate", "result": {"status": "REGRESSION"}})
-            return _Verdict(ok=False, reason=regression)
+            return self._reject_after_suite(regression, suite_after)
 
         self.emit("stage_end", {"stage": "evaluate", "result": {"status": "PASS"}})
         return _Verdict(ok=True, reason="", suite_after=suite_after)
@@ -437,7 +495,7 @@ class FixEngine:
     def _evaluate_review_fix(self, scratch: Path, changed: list[str], baseline: SuiteRun) -> _Verdict:
         py_files = " ".join(shlex.quote(p) for p in changed if p.endswith(".py"))
         compile_step = f"(python -m py_compile {py_files} || exit {_COMPILE_FAILED_EXIT}) && " if py_files else ""
-        result = self.sandbox.run_tests(scratch, self._cmd(f"{compile_step}{self.test_command}"))
+        result = self.sandbox.run_tests(scratch, self._cmd(f"{compile_step}{self._suite_command()}"))
         self.emit("stage_end", {"stage": "act"})
 
         self.emit("stage_start", {"stage": "evaluate"})
@@ -450,9 +508,7 @@ class FixEngine:
         suite_after = parse_suite_output(result.exit_code, f"{result.stdout}\n{result.stderr}")
         regression = self._regressions(suite_after, baseline)
         if regression:
-            self.emit("log_line", {"text": f"EVALUATE: rejected, {regression}"})
-            self.emit("stage_end", {"stage": "evaluate", "result": {"status": "REGRESSION"}})
-            return _Verdict(ok=False, reason=regression)
+            return self._reject_after_suite(regression, suite_after)
 
         self.emit("log_line", {"text": "EVALUATE: compiles, and no test that passed before fails now"})
         self.emit("stage_end", {"stage": "evaluate", "result": {"status": "PASS"}})
