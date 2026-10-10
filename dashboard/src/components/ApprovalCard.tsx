@@ -31,7 +31,8 @@ export function ApprovalCard({
     <motion.div
       role="alertdialog"
       aria-labelledby="approval-title"
-      className="mx-6 mb-4 rounded-xl border border-[var(--color-amber)]/60 bg-[var(--color-amber)]/[0.07] px-4 py-3"
+      className="signal-border mx-6 mb-4 rounded-xl border border-[var(--color-amber)]/40 bg-[var(--color-amber)]/[0.07] px-4 py-3 shadow-[0_0_40px_-12px_rgba(245,158,11,0.6)] backdrop-blur-md"
+      style={{ ['--signal-color' as string]: 'var(--color-amber)', ['--signal-color-2' as string]: 'var(--color-pass)' }}
       initial={reducedMotion ? false : { opacity: 0, y: -8 }}
       animate={{ opacity: 1, y: 0 }}
     >
