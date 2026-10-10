@@ -9,6 +9,7 @@ const nodeTypes = { stage: StageNode }
 
 const LABELS: Record<PipelineNodeId, string> = {
   perceive: 'Perceive',
+  reproduce: 'Prove bug',
   plan: 'Plan',
   research: 'Research',
   act: 'Act',
@@ -18,15 +19,17 @@ const LABELS: Record<PipelineNodeId, string> = {
 
 const POSITIONS: Record<PipelineNodeId, { x: number; y: number }> = {
   perceive: { x: 0, y: 70 },
-  plan: { x: 210, y: 70 },
-  research: { x: 420, y: 70 },
-  act: { x: 630, y: 70 },
-  evaluate: { x: 840, y: 70 },
-  loop: { x: 1050, y: 70 },
+  reproduce: { x: 200, y: 70 },
+  plan: { x: 400, y: 70 },
+  research: { x: 600, y: 70 },
+  act: { x: 800, y: 70 },
+  evaluate: { x: 1000, y: 70 },
+  loop: { x: 1200, y: 70 },
 }
 
 const CHAIN: [PipelineNodeId, PipelineNodeId][] = [
-  ['perceive', 'plan'],
+  ['perceive', 'reproduce'],
+  ['reproduce', 'plan'],
   ['plan', 'research'],
   ['research', 'act'],
   ['act', 'evaluate'],
