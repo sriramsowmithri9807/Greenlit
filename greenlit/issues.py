@@ -10,7 +10,7 @@ _MAX_BODY_OUTPUT_LINES = 60
 @dataclass
 class Issue:
     key: str  # stable within a run: "test:<pytest node id>" or "review:<n>"
-    kind: str  # "test" (backed by a failing test) | "review" (found by code review)
+    kind: str  # "test" (backed by a failing test) | "review" (found by code review) | "report" (a bug report, e.g. a GitHub issue)
     title: str
     test_id: str | None = None
     failure_output: str | None = None
@@ -21,6 +21,8 @@ class Issue:
     evidence: str | None = None
     number: int | None = None  # GitHub issue number once raised
     url: str | None = None
+    proof: dict | None = None  # orchestrator.Proof.to_event(), once REPRODUCE has run
+    files: list[str] | None = None  # for "report": source files it's probably about (greenlit.locate)
 
     @property
     def location(self) -> str | None:
@@ -42,15 +44,26 @@ class Issue:
                 f"```\n{output}\n```\n\n"
                 f"{GREENLIT_FOOTER}"
             )
-        return (
+        body = (
             f"**Location:** `{self.location}`  \n"
             f"**Severity:** {self.severity}\n\n"
             f"{self.description}\n\n"
             f"**Evidence:**\n```python\n{self.evidence}\n```\n\n"
-            "Found by AI code review (NVIDIA Nemotron 3 Ultra), not by a failing test — "
-            "worth a sanity check.\n\n"
-            f"{GREENLIT_FOOTER}"
         )
+        if self.proof and self.proof.get("status") == "reproduced":
+            output = "\n".join((self.proof.get("output") or "").strip().splitlines()[-_MAX_BODY_OUTPUT_LINES:])
+            body += (
+                "Found by AI code review (NVIDIA Nemotron 3 Ultra) and **reproduced**: this test, "
+                f"`{self.proof['test_path']}`, fails on the current code.\n\n"
+                f"```python\n{self.proof['test_code']}\n```\n\n"
+                f"<details><summary>Failure</summary>\n\n```\n{output}\n```\n</details>\n\n"
+            )
+        else:
+            body += (
+                "Found by AI code review (NVIDIA Nemotron 3 Ultra), not by a failing test — "
+                "worth a sanity check.\n\n"
+            )
+        return body + GREENLIT_FOOTER
 
     def to_event(self) -> dict:
         return {
