@@ -4,6 +4,7 @@
     GET  /api/runs/{id}/events   Server-Sent Events, resumable via Last-Event-ID
     POST /api/runs/{id}/approval {approve} -> answers the run's "publish to GitHub?"
     GET  /api/health             which credentials the server has configured
+    GET  /api/benchmark          summary of the latest scripts/benchmark.py run, if any
     GET  /                       the built dashboard (dashboard/dist), if present
 
 The user's GitHub token is handed straight to the run's worker thread. It
@@ -34,6 +35,7 @@ _POLL_SECONDS = 0.15
 _HEARTBEAT_SECONDS = 15
 APPROVAL_TIMEOUT_SECONDS = 30 * 60
 DASHBOARD_DIST = Path(__file__).resolve().parent.parent / "dashboard" / "dist"
+BENCHMARK_RESULTS = Path(__file__).resolve().parent.parent / "bench" / "results" / "latest.json"
 
 
 class Run:
@@ -83,6 +85,7 @@ class RunRequest(BaseModel):
     repo_url: str
     token: str | None = None
     include_review: bool = True
+    parallel: bool = True
 
 
 app = FastAPI(title="Greenlit")
@@ -98,6 +101,18 @@ def health() -> dict:
     return {
         "nebius_configured": _nebius_configured(),
         "tavily_configured": bool(os.environ.get("TAVILY_API_KEY")),
+    }
+
+
+@app.get("/api/benchmark")
+def benchmark() -> dict:
+    if not BENCHMARK_RESULTS.is_file():
+        raise HTTPException(status_code=404, detail="No benchmark has been run yet (python scripts/benchmark.py).")
+    report = json.loads(BENCHMARK_RESULTS.read_text())
+    return {
+        "benchmark": report.get("benchmark"),
+        "finished_at": report.get("finished_at"),
+        "summary": report.get("summary", {}),
     }
 
 
@@ -121,11 +136,13 @@ def start_run(request: RunRequest) -> dict:
     for stale_id in [rid for rid, r in _runs.items() if r.done][: max(0, len(_runs) - MAX_KEPT_RUNS)]:
         del _runs[stale_id]
 
-    repo_url, token, include_review = request.repo_url, request.token, request.include_review
+    repo_url, token, include_review, parallel = request.repo_url, request.token, request.include_review, request.parallel
 
     def work() -> None:
         try:
-            agent.run_agent(repo_url, token, include_review=include_review, emit=run.emit, approve=run.wait_for_approval)
+            agent.run_agent(
+                repo_url, token, include_review=include_review, emit=run.emit, approve=run.wait_for_approval, parallel=parallel
+            )
         finally:
             run.done = True
 
