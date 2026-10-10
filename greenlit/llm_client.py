@@ -16,6 +16,7 @@ import os
 import time
 from typing import Any
 
+from greenlit import usage
 from openai import (
     APIConnectionError,
     APITimeoutError,
@@ -26,8 +27,8 @@ from openai import (
 
 BASE_URL = "https://api.tokenfactory.nebius.com/v1/"
 
-PLAN_MODEL = "nvidia/Nemotron-3-Ultra-550b-a55b"
-EVAL_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B"
+PLAN_MODEL = usage.ULTRA_MODEL
+EVAL_MODEL = usage.NANO_MODEL
 
 _RETRYABLE_ERRORS = (APIConnectionError, APITimeoutError, RateLimitError, InternalServerError)
 _MAX_ATTEMPTS = 3
@@ -44,11 +45,25 @@ def get_client() -> OpenAI:
     return OpenAI(base_url=BASE_URL, api_key=api_key)
 
 
-def _create_with_retry(client: OpenAI, **kwargs: Any):
+def _record_usage(role: str, model: str, response, started: float) -> None:
+    tokens = getattr(response, "usage", None)
+    usage.record(
+        role,
+        model,
+        getattr(tokens, "prompt_tokens", 0) or 0,
+        getattr(tokens, "completion_tokens", 0) or 0,
+        int((time.monotonic() - started) * 1000),
+    )
+
+
+def _create_with_retry(client: OpenAI, *, role: str, **kwargs: Any):
     last_exc: Exception | None = None
     for attempt in range(1, _MAX_ATTEMPTS + 1):
+        started = time.monotonic()
         try:
-            return client.chat.completions.create(**kwargs)
+            response = client.chat.completions.create(**kwargs)
+            _record_usage(role, kwargs["model"], response, started)
+            return response
         except _RETRYABLE_ERRORS as exc:
             last_exc = exc
             if attempt == _MAX_ATTEMPTS:
@@ -138,6 +153,7 @@ def call_planner(error_context: dict) -> dict:
     client = get_client()
     response = _create_with_retry(
         client,
+        role="plan",
         model=PLAN_MODEL,
         messages=[
             {"role": "system", "content": _PLAN_SYSTEM_PROMPT},
@@ -195,6 +211,7 @@ def call_evaluator(
     client = get_client()
     response = _create_with_retry(
         client,
+        role="evaluate",
         model=EVAL_MODEL,
         messages=[
             {"role": "system", "content": _EVAL_SYSTEM_PROMPT},
@@ -276,6 +293,7 @@ def call_reviewer(source_files: dict[str, str], known_failures: list[str]) -> li
     client = get_client()
     response = _create_with_retry(
         client,
+        role="review",
         model=PLAN_MODEL,
         messages=[
             {"role": "system", "content": _REVIEW_SYSTEM_PROMPT},
@@ -290,3 +308,112 @@ def call_reviewer(source_files: dict[str, str], known_failures: list[str]) -> li
         tool_choice={"type": "function", "function": {"name": "report_bugs"}},
     )
     return _extract_tool_call_args(response, "report_bugs").get("bugs", [])
+
+
+# --- REPRODUCE: write a test that proves a reported bug (Ultra) ------------
+
+_WRITE_TEST_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "write_reproduction_test",
+        "description": "Write a pytest test that fails on the current code because of the reported bug.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "test_code": {
+                    "type": "string",
+                    "description": "The complete contents of the new test file (imports included).",
+                },
+                "explanation": {
+                    "type": "string",
+                    "description": "One sentence: what the test checks and why it fails today.",
+                },
+            },
+            "required": ["test_code", "explanation"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+_WRITE_TEST_SYSTEM_PROMPT = (
+    "You are the REPRODUCE step of an autonomous bug-fixing agent. A code reviewer "
+    "reported a bug (issue: title, location, description, evidence). Before anyone "
+    "fixes it, prove it: write a small pytest test file that asserts the CORRECT "
+    "behaviour the issue describes, so it FAILS on the current code because of this "
+    "bug and will PASS once the bug is fixed. Rules: the file will be saved at "
+    "test_path, so import the code under test the way example_test does (or relative "
+    "to the repository root); use only the standard library and pytest; keep it to "
+    "one to three focused test functions named test_*; never import or call anything "
+    "that isn't in source_files; no network, no file writes. If prior_attempt is "
+    "present, it says why your last test didn't prove the bug; fix that. Always "
+    "respond by calling the write_reproduction_test tool."
+)
+
+
+def call_test_writer(context: dict) -> dict:
+    """context keys: issue, source_files, test_path, example_test (optional
+    {path, content}), prior_attempt (optional str)."""
+    client = get_client()
+    response = _create_with_retry(
+        client,
+        role="write_test",
+        model=PLAN_MODEL,
+        messages=[
+            {"role": "system", "content": _WRITE_TEST_SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps(context, indent=2)},
+        ],
+        tools=[_WRITE_TEST_TOOL],
+        tool_choice={"type": "function", "function": {"name": "write_reproduction_test"}},
+    )
+    return _extract_tool_call_args(response, "write_reproduction_test")
+
+
+# --- REPRODUCE: does the failure actually show the bug? (Nano) -------------
+
+_JUDGE_TEST_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "judge_reproduction",
+        "description": "Decide whether a failing test demonstrates the reported bug.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "verdict": {"type": "string", "enum": ["REPRODUCES_BUG", "TEST_IS_BROKEN"]},
+                "reason": {"type": "string", "description": "One line."},
+            },
+            "required": ["verdict", "reason"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+_JUDGE_TEST_SYSTEM_PROMPT = (
+    "You check a test written to reproduce a reported bug. It ran against the "
+    "current code and failed. REPRODUCES_BUG: the failure is the behaviour the issue "
+    "describes (a wrong value in an assertion, or the crash/exception the issue "
+    "reports). TEST_IS_BROKEN: the test failed for its own reasons, e.g. ImportError, "
+    "NameError, AttributeError on something that doesn't exist, a syntax error, a "
+    "fixture error, or an assertion about behaviour the issue never mentions. Always "
+    "respond by calling the judge_reproduction tool."
+)
+
+
+def call_repro_judge(issue: dict, test_code: str, test_output: str) -> dict:
+    client = get_client()
+    response = _create_with_retry(
+        client,
+        role="judge_test",
+        model=EVAL_MODEL,
+        messages=[
+            {"role": "system", "content": _JUDGE_TEST_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {"issue": issue, "test_code": test_code, "test_output": test_output[-6000:]}, indent=2
+                ),
+            },
+        ],
+        tools=[_JUDGE_TEST_TOOL],
+        tool_choice={"type": "function", "function": {"name": "judge_reproduction"}},
+    )
+    return _extract_tool_call_args(response, "judge_reproduction")
