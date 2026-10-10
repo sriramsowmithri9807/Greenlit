@@ -29,6 +29,7 @@ from greenlit.orchestrator import DEFAULT_MAX_ITERATIONS
 
 COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 _reported = False  # after the change report, the combined diff would just repeat it
+COST: dict = {}
 
 
 def ask_to_publish(request: dict, *, assume_yes: bool) -> bool:
@@ -65,7 +66,22 @@ def emit(event_type: str, payload: dict) -> None:
         print()
         print(render_text(payload, color=COLOR))
         print()
-    elif event_type in ("stage_start", "stage_end", "iteration", "approval_required", "approval"):
+    elif event_type == "proof":
+        if payload["status"] == "reproduced":
+            print(f"  ✓ proven: {payload['test_path']} fails on the current code")
+            for line in (payload["test_code"] or "").splitlines():
+                print(f"  │ {line}")
+        elif payload["status"] == "not_reproduced":
+            print(f"  ✗ not reproduced, dismissing {payload['key']}: {payload['reason']}")
+    elif event_type == "race_start":
+        print(f"[race] {len(payload['lanes'])} issue(s) across {payload['sandboxes']} sandboxes")
+    elif event_type == "lane_end":
+        print(f"[lane] {payload['key']}: {payload['status']} in {payload['seconds']}s")
+    elif event_type == "cost_summary":
+        COST.update(payload)
+    elif event_type in (
+        "stage_start", "stage_end", "iteration", "approval_required", "approval", "lane", "usage", "merge_start", "merge_end",
+    ):
         return
     else:
         print(f"[{event_type}] {payload}")
@@ -76,6 +92,7 @@ def main() -> int:
     parser.add_argument("repo", help="GitHub repo URL, owner/repo, or a local folder")
     parser.add_argument("--live", action="store_true", help="Raise issues and open a PR (reads GITHUB_TOKEN)")
     parser.add_argument("--yes", action="store_true", help="With --live: publish without asking")
+    parser.add_argument("--sequential", action="store_true", help="Fix one issue at a time in a single sandbox")
     parser.add_argument("--no-review", action="store_true", help="Skip the Nemotron code review; failing tests only")
     parser.add_argument("--max-issues", type=int, default=DEFAULT_MAX_ISSUES)
     parser.add_argument("--max-iterations", type=int, default=DEFAULT_MAX_ITERATIONS)
@@ -96,10 +113,19 @@ def main() -> int:
         emit=emit,
         approve=lambda request: ask_to_publish(request, assume_yes=args.yes),
         allow_local=True,
+        parallel=not args.sequential,
     )
     print()
     print(f"Result: {result.status}")
-    print(f"Fixed: {len(result.fixed)}  Unresolved: {len(result.unresolved)}")
+    print(f"Fixed: {len(result.fixed)}  Unresolved: {len(result.unresolved)}  Dismissed (not reproduced): {len(result.dismissed)}")
+    print(f"Time: {result.seconds:.1f}s")
+    if COST:
+        print(
+            f"Cost (est.): ${COST['total_usd']:.4f}  "
+            f"Ultra {COST['ultra']['calls']} call(s) ${COST['ultra']['cost_usd']:.4f} · "
+            f"Nano {COST['nano']['calls']} call(s) ${COST['nano']['cost_usd']:.4f} · "
+            f"{COST['savings_pct']:.0f}% cheaper than Ultra-only"
+        )
     if result.pr_url:
         print(f"Pull request: {result.pr_url}")
     elif args.live and result.status in ("fixed", "partial", "unresolved") and not result.published:
