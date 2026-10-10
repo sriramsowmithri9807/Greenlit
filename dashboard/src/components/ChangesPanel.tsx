@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion'
-import { FileCode2 } from 'lucide-react'
+import { FileCode2, ShieldCheck } from 'lucide-react'
 import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion'
 import type { ChangedFile, Changes } from '@/types/events'
 
@@ -16,6 +16,11 @@ function FileBlock({ file }: { file: ChangedFile }) {
         <FileCode2 size={13} className="text-[var(--color-done)]" />
         <span className="font-mono font-semibold text-[var(--color-fg)]">{file.path}</span>
         {file.status !== 'modified' && <span className="text-[var(--color-amber)]">{file.status}</span>}
+        {file.status === 'added' && file.path.split('/').pop()?.startsWith('test_greenlit_') && (
+          <span className="flex items-center gap-1 rounded border border-[var(--color-done)]/40 bg-[var(--color-done)]/10 px-1.5 font-mono text-[10px] text-[var(--color-done)]">
+            <ShieldCheck size={11} /> regression test: failed before the fix, passes after
+          </span>
+        )}
         <span className="font-mono text-[var(--color-pass)]">+{file.added}</span>
         <span className="-ml-2 font-mono text-[var(--color-fail)]">-{file.removed}</span>
         {file.lines_changed && <span className="ml-auto font-mono text-[var(--color-fg-muted)]">lines {file.lines_changed}</span>}
