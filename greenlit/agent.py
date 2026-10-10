@@ -2,7 +2,9 @@
 verified in a sandbox, and come back as a pull request.
 
     clone -> scan (test suite + Nemotron code review) -> list issues
-          -> fix each one (greenlit.orchestrator.FixEngine)
+          -> fix them: in parallel, one Nebius sandbox per issue, then merge and
+             re-verify (greenlit.parallel); code-review findings must first be
+             reproduced by a failing test (greenlit.orchestrator.FixEngine)
           -> review: report every change (files, lines, code) and ask to publish
           -> if approved: raise the GitHub issues, commit + push, open a PR that
              closes what was fixed, comment on what wasn't
@@ -18,6 +20,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 import textwrap
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -25,10 +28,12 @@ from pathlib import Path
 
 from greenlit.clients.sandbox import Sandbox
 from greenlit.config import GreenlitConfig
+from greenlit import usage
 from greenlit.changes import summarize
 from greenlit.github import GitHubAPI, GitHubError, GitWorkspace, mask, parse_repo_url
 from greenlit.issues import Issue
 from greenlit.orchestrator import DEFAULT_MAX_ITERATIONS, FixEngine, FixResult
+from greenlit.parallel import Outcome, max_sandboxes, merge, race
 from greenlit.perceive import failure_section
 from greenlit.project import UnsupportedProject, detect
 from greenlit.repo_files import IGNORED_DIRS
@@ -53,8 +58,11 @@ class AgentResult:
     issues: list[Issue] = field(default_factory=list)
     fixed: list[str] = field(default_factory=list)
     unresolved: list[str] = field(default_factory=list)
+    dismissed: list[str] = field(default_factory=list)
     pr_url: str | None = None
     published: bool = False
+    usage: dict = field(default_factory=dict)
+    seconds: float = 0.0
 
 
 def _noop_emit(event_type: str, payload: dict) -> None:
@@ -80,37 +88,66 @@ def _test_issue_title(test_id: str, reason: str) -> str:
 
 
 def _commit_message(issue: Issue, result: FixResult) -> str:
-    verified = (
-        f"{issue.test_id} passes and no previously-passing test fails"
-        if issue.kind == "test"
-        else "the patched code compiles and no previously-passing test fails"
-    )
+    proof = result.proof
+    if issue.kind == "test":
+        verified = f"{issue.test_id} passes and no previously-passing test fails"
+    elif proof and proof.status == "reproduced":
+        verified = (
+            f"the new regression test {proof.test_path} failed before this change and passes "
+            "after it, and no previously-passing test fails"
+        )
+    else:
+        verified = "the patched code compiles and no previously-passing test fails"
     rationale = textwrap.fill(result.rationale or "", width=72)
     return f"Fix {issue.ref}: {issue.title}\n\n{rationale}\n\nVerified by Greenlit in a Nebius Token Factory sandbox: {verified}."
 
 
-def _pr_body(fixed: list[Issue], unresolved: list[Issue], incidental: set[str], results: dict[str, FixResult]) -> str:
+def _proof_note(issue: Issue, results: dict[str, FixResult]) -> str:
+    result = results.get(issue.key)
+    proof = result.proof if result else None
+    if proof and proof.status == "reproduced":
+        return f" Proven by new test `{proof.test_path}`: fails before, passes after."
+    return ""
+
+
+def _pr_body(
+    fixed: list[Issue],
+    unresolved: list[Issue],
+    incidental: set[str],
+    results: dict[str, FixResult],
+    dismissed: list[Issue] | None = None,
+    cost: dict | None = None,
+) -> str:
     lines = [
         f"Greenlit scanned this repo, raised {len(fixed) + len(unresolved)} issue(s) and fixed {len(fixed)}. "
         "Every fix was checked by running the test suite in an isolated Nebius Token Factory sandbox "
-        "before it was committed.",
+        "before it was committed. Bugs found by code review were first reproduced with a failing test, "
+        "and that test is included here so the bug can't come back.",
         "",
         "### Fixed",
     ]
     for issue in fixed:
         note = " (fixed as a side effect of an earlier change)" if issue.key in incidental else ""
-        lines.append(f"- Closes {issue.ref}: {issue.title} (`{issue.location}`){note}")
+        lines.append(f"- Closes {issue.ref}: {issue.title} (`{issue.location}`){note}{_proof_note(issue, results)}")
     if unresolved:
         lines += ["", "### Not fixed"]
         for issue in unresolved:
             attempts = results.get(issue.key)
             reason = attempts.attempts[-1].why_it_failed if attempts and attempts.attempts else "no fix passed verification"
             lines.append(f"- {issue.ref}: {issue.title}. Last attempt rejected because {reason}")
-    if any(i.kind == "review" for i in fixed):
+    unproven = [i for i in fixed if i.kind == "review" and not _proof_note(i, results)]
+    if unproven:
         lines += [
             "",
-            "> Fixes for issues found by code review aren't backed by a failing test. "
-            "They compile and don't break any test, but please review them closely.",
+            "> Greenlit couldn't write a test reproducing "
+            + ", ".join(i.ref for i in unproven)
+            + ". Those fixes compile and don't break any test, but please review them closely.",
+        ]
+    if dismissed:
+        lines += [
+            "",
+            f"Greenlit also dropped {len(dismissed)} code-review finding(s) without raising them: "
+            "its reproduction tests passed on the current code, so they're probably not real bugs.",
         ]
     lines += [
         "",
@@ -119,8 +156,13 @@ def _pr_body(fixed: list[Issue], unresolved: list[Issue], incidental: set[str], 
         "Code review and fix planning: NVIDIA Nemotron 3 Ultra. Test-result evaluation: NVIDIA Nemotron 3 Nano. "
         "Both served by Nebius Token Factory. A fix is only accepted if the target test passes and no "
         "previously-passing test fails.",
-        "</details>",
     ]
+    if cost and cost.get("total_usd"):
+        lines.append(
+            f"Model cost for this run: ${cost['total_usd']:.4f} "
+            f"({cost['savings_pct']:.0f}% less than running every step on Ultra)."
+        )
+    lines.append("</details>")
     return "\n".join(lines)
 
 
@@ -181,6 +223,7 @@ def run_agent(
     api_factory: Callable[[str | None], GitHubAPI] = GitHubAPI,
     remote_url: str | None = None,
     allow_local: bool = False,
+    parallel: bool = True,
 ) -> AgentResult:
     """`repo_url` is a GitHub URL, or (only when `allow_local`, i.e. from the
     CLI, never from the web server) a local folder, which always runs as a
@@ -189,7 +232,11 @@ def run_agent(
     `approve` is called once, after every fix is verified, with what
     publishing would do (see _publish_request). It may block while it asks
     the user. Only a True answer lets anything be written to GitHub; the
-    default declines."""
+    default declines.
+
+    With `parallel`, issues are fixed at the same time, each in its own
+    sandbox from `sandbox_factory` (up to GREENLIT_MAX_SANDBOXES), and then
+    merged and re-verified."""
     token = (token or "").strip() or None
     local_dir = Path(repo_url).expanduser() if allow_local and Path(repo_url).expanduser().is_dir() else None
     live = token is not None and local_dir is None
@@ -197,6 +244,14 @@ def run_agent(
     sandbox: Sandbox | None = None
     api: GitHubAPI | None = None
     issues: list[Issue] = []
+    started = time.monotonic()
+    tally = usage.Tally()
+
+    def on_usage(call: usage.Usage) -> None:
+        tally(call)
+        emit("usage", call.to_event())
+
+    usage_token = usage.install(on_usage)
 
     try:
         emit("status", {"value": "scanning"})
@@ -300,7 +355,7 @@ def run_agent(
             emit("log_line", {"text": "No issues found. Every test passes and code review came back clean."})
             emit("status", {"value": "clean"})
             emit("phase", {"value": "done"})
-            return AgentResult(status="clean")
+            return AgentResult(status="clean", usage=tally.summary(), seconds=time.monotonic() - started)
 
         # --- issues -----------------------------------------------------------------
         # Found issues are listed locally. Nothing is written to GitHub until
@@ -317,39 +372,60 @@ def run_agent(
         emit("phase", {"value": "fix"})
         emit("status", {"value": "testing"})
 
-        fixed: list[Issue] = []
-        unresolved: list[Issue] = []
-        incidental: set[str] = set()
         results: dict[str, FixResult] = {}
         snapshots: dict[str, str] = {}  # issue key -> tree after its fix
         fix_diffs: list[dict] = []
-        base_tree = previous_tree = workspace.head_tree()
+        base_tree = workspace.head_tree()
+        trees = [base_tree]
 
-        for position, issue in enumerate(issues):
-            emit("issue_start", {"key": issue.key, "remaining": len(issues) - position})
-            if issue.kind == "test" and issue.test_id not in baseline.problem_ids:
-                emit("log_line", {"text": f"{issue.ref} already passes after an earlier fix"})
-                fixed.append(issue)
-                incidental.add(issue.key)
-                emit("issue_end", {"key": issue.key, "status": "fixed"})
-                continue
-
-            result = engine.fix(issue, baseline)
-            results[issue.key] = result
-            if result.status != "fixed":
-                unresolved.append(issue)
-                emit("issue_end", {"key": issue.key, "status": "unresolved"})
-                continue
-
-            baseline = result.suite_after or baseline
-            fixed.append(issue)
+        def on_applied(issue: Issue, result: FixResult) -> None:
+            """A verified fix just landed in the working copy: snapshot it."""
             tree = workspace.snapshot(result.changed_files)
             snapshots[issue.key] = tree
             fix_diffs.append(
-                {"key": issue.key, "title": issue.title, "location": issue.location, "diff": workspace.diff_trees(previous_tree, tree)}
+                {"key": issue.key, "title": issue.title, "location": issue.location, "diff": workspace.diff_trees(trees[-1], tree)}
             )
-            previous_tree = tree
-            emit("issue_end", {"key": issue.key, "status": "fixed"})
+            trees.append(tree)
+
+        outcomes: list[Outcome] = []
+        if parallel and len(issues) > 1:
+            lanes = race(issues, engine, baseline, sandbox_factory=sandbox_factory, emit=emit, workers=max_sandboxes())
+            for lane in lanes:
+                results[lane.issue.key] = lane.result
+            outcomes, baseline = merge(lanes, engine, baseline, emit=emit, on_applied=on_applied)
+            for outcome in outcomes:
+                if outcome.result is not None:
+                    results[outcome.issue.key] = outcome.result
+                emit("issue_end", {"key": outcome.issue.key, "status": outcome.status})
+        else:
+            for position, issue in enumerate(issues):
+                emit("issue_start", {"key": issue.key, "remaining": len(issues) - position})
+                if issue.kind == "test" and issue.test_id not in baseline.problem_ids:
+                    emit("log_line", {"text": f"{issue.ref} already passes after an earlier fix"})
+                    outcomes.append(Outcome(issue, "fixed", None, incidental=True))
+                    emit("issue_end", {"key": issue.key, "status": "fixed"})
+                    continue
+                with usage.for_issue(issue.key):
+                    result = engine.fix(issue, baseline)
+                results[issue.key] = result
+                if result.status == "fixed":
+                    baseline = result.suite_after or baseline
+                    on_applied(issue, result)
+                outcomes.append(Outcome(issue, result.status, result))
+                emit("issue_end", {"key": issue.key, "status": result.status})
+
+        fixed = [o.issue for o in outcomes if o.status == "fixed"]
+        unresolved = [o.issue for o in outcomes if o.status == "unresolved"]
+        dismissed = [o.issue for o in outcomes if o.status == "dismissed"]
+        incidental = {o.issue.key for o in outcomes if o.incidental}
+        for issue in issues:
+            proof = results[issue.key].proof if issue.key in results else None
+            issue.proof = proof.to_event(issue.key) if proof else None
+        if dismissed:
+            emit("log_line", {"text": f"Dropped {len(dismissed)} code-review finding(s) Greenlit couldn't reproduce with a test"})
+        # Only what was proven (or is backed by a failing test) goes to GitHub.
+        to_raise = [issue for issue in issues if issue not in dismissed]
+        previous_tree = trees[-1]
 
         # Verification is over; don't hold a sandbox open while waiting on the user.
         sandbox.close()
@@ -374,7 +450,7 @@ def run_agent(
         published = False
         if live:
             branch = f"{BRANCH_PREFIX}{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
-            request = _publish_request(ref.full_name, branch, default_branch, issues, fixed, unresolved, snapshots, changes)
+            request = _publish_request(ref.full_name, branch, default_branch, to_raise, fixed, unresolved, snapshots, changes)
             emit("status", {"value": "awaiting_approval"})
             emit("approval_required", request)
             published = bool(approve(request))
@@ -388,11 +464,11 @@ def run_agent(
                     api.ensure_label(ref, LABEL_NAME, LABEL_COLOR, LABEL_DESCRIPTION)
                 except GitHubError:
                     labels = []
-                for issue in issues:
+                for issue in to_raise:
                     created = api.create_issue(ref, f"[Greenlit] {issue.title}", issue.github_body(), labels)
                     issue.number, issue.url = created["number"], created["html_url"]
                     emit("issue_published", {"key": issue.key, "number": issue.number, "url": issue.url})
-                emit("log_line", {"text": f"Raised {len(issues)} issue(s) on {ref.full_name}"})
+                emit("log_line", {"text": f"Raised {len(to_raise)} issue(s) on {ref.full_name}"})
 
                 committed = [issue for issue in fixed if issue.key in snapshots]
                 if committed:
@@ -414,7 +490,7 @@ def run_agent(
                         title=f"Greenlit: fix {len(fixed)} issue(s)",
                         head=branch,
                         base=default_branch,
-                        body=_pr_body(fixed, unresolved, incidental, results),
+                        body=_pr_body(fixed, unresolved, incidental, results, dismissed, tally.summary()),
                     )
                     pr_url = pr["html_url"]
                     emit("pr_opened", {"number": pr["number"], "url": pr_url})
@@ -429,7 +505,10 @@ def run_agent(
                 {"text": f"Dry run complete: {len(fixed)} fix(es) verified in the sandbox, nothing pushed. Add a token to raise issues and open a pull request."},
             )
 
-        status = "fixed" if not unresolved else ("partial" if fixed else "unresolved")
+        if not fixed and not unresolved:
+            status = "clean"  # every finding was dismissed as unreproducible
+        else:
+            status = "fixed" if not unresolved else ("partial" if fixed else "unresolved")
         emit("status", {"value": status})
         emit("phase", {"value": "done"})
         return AgentResult(
@@ -437,8 +516,11 @@ def run_agent(
             issues=issues,
             fixed=[i.key for i in fixed],
             unresolved=[i.key for i in unresolved],
+            dismissed=[i.key for i in dismissed],
             pr_url=pr_url,
             published=published,
+            usage=tally.summary(),
+            seconds=time.monotonic() - started,
         )
 
     except AgentError as exc:
@@ -450,6 +532,9 @@ def run_agent(
         emit("status", {"value": "error"})
         return AgentResult(status="error", issues=issues)
     finally:
+        usage.uninstall(usage_token)
+        if tally.calls:
+            emit("cost_summary", tally.summary())
         if sandbox is not None:
             sandbox.close()
         if api is not None:
