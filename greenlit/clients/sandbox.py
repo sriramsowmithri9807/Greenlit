@@ -20,6 +20,10 @@ from greenlit.config import GreenlitConfig
 from greenlit.repo_files import iter_repo_files
 
 DEFAULT_BASE_IMAGE = "python:3.11-slim"
+# Backstop for a whole sandbox command (install + tests). The test run itself
+# is capped tighter inside the sandbox by FixEngine (coreutils `timeout`),
+# which reports a clean exit code; this only catches anything that slips past.
+DEFAULT_RUN_TIMEOUT_SECONDS = 1800.0
 
 
 @dataclass
@@ -30,10 +34,16 @@ class SandboxResult:
 
 
 class Sandbox:
-    def __init__(self, config: GreenlitConfig, base_image: str = DEFAULT_BASE_IMAGE):
+    def __init__(
+        self,
+        config: GreenlitConfig,
+        base_image: str = DEFAULT_BASE_IMAGE,
+        run_timeout: float = DEFAULT_RUN_TIMEOUT_SECONDS,
+    ):
         self._client = ContreeClient(config.nebius_api_key, project=config.nebius_ai_project)
         self._sdk = ContreeSync(self._client)
         self._base_image = base_image
+        self._run_timeout = run_timeout
 
     def run_shell(self, command: str) -> SandboxResult:
         """Run a bare shell command with no file staging. Used for the
@@ -56,7 +66,7 @@ class Sandbox:
         }
         image = self._sdk.images.use(self._base_image)
         staged = image.apply_files(files=files)
-        result = staged.run(shell=f"cd /work && {test_command}", disposable=True).wait()
+        result = staged.run(shell=f"cd /work && {test_command}", disposable=True, timeout=self._run_timeout).wait()
         return SandboxResult(
             stdout=result.stdout or "",
             stderr=result.stderr or "",

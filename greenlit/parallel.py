@@ -103,6 +103,8 @@ def race(
                 engine.test_command,
                 emit=_lane_emitter(emit, issue),
                 max_iterations=engine.max_iterations,
+                suite_targets=engine.suite_targets,
+                test_timeout=engine.test_timeout,
             )
             with usage.for_issue(issue.key):
                 result = lane.fix(issue, baseline)
@@ -130,6 +132,9 @@ def race(
 
 
 def _clean_on_top(suite: SuiteRun, baseline: SuiteRun, issues: list[Issue], results: dict[str, FixResult]) -> bool:
+    # Fixes that each finished alone can still hang or crash together.
+    if not suite.completed:
+        return False
     if suite.problem_ids - baseline.problem_ids:
         return False
     for issue in issues:
@@ -185,7 +190,8 @@ def merge(
 
     # Slow path: one at a time, re-verifying, re-fixing what doesn't fit.
     if verified:
-        emit("log_line", {"text": "MERGE: fixes interact when combined; merging one at a time and re-verifying each"})
+        why = f" (the combined suite didn't finish: {engine.unfinished(suite).splitlines()[0]})" if suite is not None and not suite.completed else ""
+        emit("log_line", {"text": f"MERGE: fixes interact when combined{why}; merging one at a time and re-verifying each"})
     for lane in verified:
         issue = lane.issue
         if issue.kind == "test" and issue.test_id not in baseline.problem_ids:

@@ -29,6 +29,13 @@ _PYTEST_RESULT_RE = re.compile(
 )
 _MAX_SOURCE_FILES = 5
 PYTEST_NO_TESTS_COLLECTED = 5
+# pytest's exit codes for a session that ran to the end: all passed, some
+# failed, nothing collected. Anything else (interrupted, internal error,
+# usage error, killed) means its results can't be trusted.
+_FINISHED_EXIT_CODES = frozenset({0, 1, PYTEST_NO_TESTS_COLLECTED})
+# What GNU `timeout` exits with: it stopped the command / had to SIGKILL it.
+TIMEOUT_EXIT_CODES = frozenset({124, 137})
+_REASON_TAIL_LINES = 8
 
 
 @dataclass
@@ -53,6 +60,41 @@ class SuiteRun:
         """False when pytest never produced a result line, e.g. because the
         install step failed before it started."""
         return bool(_PYTEST_RESULT_RE.search(self.output))
+
+    @property
+    def completed(self) -> bool:
+        """True only when pytest ran its whole session and reported on it.
+
+        A run that crashed, hung and was killed, or ended the interpreter
+        early (os._exit, a segfault) prints no summary, so it has no
+        failures to report. Without this check that silence reads as
+        "nothing broke"."""
+        return self.ran and self.exit_code in _FINISHED_EXIT_CODES
+
+    @property
+    def timed_out(self) -> bool:
+        return self.exit_code in TIMEOUT_EXIT_CODES
+
+    def incomplete_reason(self, timeout_seconds: int | None = None) -> str:
+        """Why the run didn't complete, for logs and for the planner."""
+        if self.timed_out:
+            after = f" after {timeout_seconds}s" if timeout_seconds else ""
+            reason = f"it timed out{after} and was stopped (an infinite loop or a hang?)"
+        elif self.exit_code == 2:
+            reason = "pytest was interrupted"
+        elif self.exit_code == 3:
+            reason = "pytest hit an internal error"
+        elif self.exit_code == 4:
+            reason = "pytest couldn't start (usage error)"
+        elif not self.ran:
+            reason = (
+                f"it ended without reporting any results (exit code {self.exit_code}): the install "
+                "step failed, or the process crashed or exited before pytest could finish"
+            )
+        else:
+            reason = f"pytest exited with code {self.exit_code}"
+        tail = "\n".join(self.output.strip().splitlines()[-_REASON_TAIL_LINES:])
+        return f"{reason}. Last output:\n{tail}" if tail else reason
 
     @property
     def problem_ids(self) -> set[str]:
