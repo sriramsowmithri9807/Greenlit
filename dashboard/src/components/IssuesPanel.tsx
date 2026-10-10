@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { CircleCheck, CircleDot, CircleX, ExternalLink, FlaskConical, GitCommitHorizontal, LoaderCircle, ScanSearch } from 'lucide-react'
+import { Ban, CircleCheck, CircleDot, CircleX, ExternalLink, FlaskConical, GitCommitHorizontal, LoaderCircle, ScanSearch, ShieldCheck, ShieldQuestion } from 'lucide-react'
 import { Card, CardHeader, CardTitle } from '@/components/ui/card'
 import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion'
 import { cn } from '@/lib/utils'
@@ -11,6 +11,7 @@ const STATUS_META: Record<IssueStatus, { label: string; color: string }> = {
   fixing: { label: 'Fixing', color: 'var(--color-amber)' },
   fixed: { label: 'Fixed', color: 'var(--color-pass)' },
   unresolved: { label: 'Not fixed', color: 'var(--color-fail)' },
+  dismissed: { label: 'Not reproduced', color: 'var(--color-fg-muted)' },
 }
 
 function StatusIcon({ status, reducedMotion }: { status: IssueStatus; reducedMotion: boolean }) {
@@ -18,8 +19,35 @@ function StatusIcon({ status, reducedMotion }: { status: IssueStatus; reducedMot
   if (status === 'fixing') {
     return <LoaderCircle size={16} style={{ color }} className={reducedMotion ? '' : 'animate-spin'} />
   }
-  const Icon = status === 'fixed' ? CircleCheck : status === 'unresolved' ? CircleX : CircleDot
+  const Icon = status === 'fixed' ? CircleCheck : status === 'unresolved' ? CircleX : status === 'dismissed' ? Ban : CircleDot
   return <Icon size={16} style={{ color }} />
+}
+
+function ProofBadge({ proof }: { proof: NonNullable<UiIssue['proof']> }) {
+  if (proof.status === 'reproduced') {
+    return (
+      <motion.span
+        initial={{ opacity: 0, scale: 0.9 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className="flex w-fit items-center gap-1 rounded-md border border-[var(--color-done)]/40 bg-[var(--color-done)]/10 px-1.5 py-0.5 font-mono text-[10.5px] text-[var(--color-done)]"
+        title={proof.reason}
+      >
+        <ShieldCheck size={11} /> Proven by failing test · {proof.test_path?.split('/').pop()}
+      </motion.span>
+    )
+  }
+  if (proof.status === 'not_reproduced') {
+    return (
+      <span className="flex w-fit items-center gap-1 text-[10.5px] text-[var(--color-fg-muted)]" title={proof.reason}>
+        <Ban size={11} /> Tests pass on current code: likely a false positive, dropped
+      </span>
+    )
+  }
+  return (
+    <span className="flex w-fit items-center gap-1 text-[10.5px] text-[var(--color-amber)]/80" title={proof.reason}>
+      <ShieldQuestion size={11} /> Couldn't write a reproducing test
+    </span>
+  )
 }
 
 function IssueRow({ issue, active, reducedMotion }: { issue: UiIssue; active: boolean; reducedMotion: boolean }) {
@@ -31,12 +59,31 @@ function IssueRow({ issue, active, reducedMotion }: { issue: UiIssue; active: bo
       animate={{ opacity: 1, x: 0 }}
       transition={reducedMotion ? { duration: 0 } : { duration: 0.3, ease: 'easeOut' }}
       className={cn(
-        'relative flex gap-3 rounded-lg border px-3 py-2.5 transition-colors duration-300',
+        'relative flex gap-3 overflow-hidden rounded-lg border px-3 py-2.5 transition-colors duration-300',
         active
           ? 'border-[var(--color-amber)]/60 bg-[var(--color-amber)]/[0.06]'
-          : 'border-[var(--color-border)] bg-[var(--color-surface)]',
+          : issue.status === 'fixed'
+            ? 'border-[var(--color-pass)]/30 bg-[var(--color-pass)]/[0.04]'
+            : issue.status === 'unresolved'
+              ? 'border-[var(--color-fail)]/30 bg-black/20'
+              : 'border-[var(--color-border)] bg-black/20',
       )}
     >
+      {/* A scan beam sweeping across the issue being worked on. */}
+      {active && !reducedMotion && (
+        <span aria-hidden className="pointer-events-none absolute inset-y-0 left-0 w-1/3 animate-beam bg-gradient-to-r from-transparent via-[var(--color-amber)]/15 to-transparent" />
+      )}
+      {active && <span aria-hidden className="absolute inset-y-0 left-0 w-[3px] bg-[var(--color-amber)] shadow-[0_0_10px_var(--color-amber)]" />}
+      {/* The moment it goes green. */}
+      {issue.status === 'fixed' && !reducedMotion && (
+        <motion.span
+          aria-hidden
+          className="pointer-events-none absolute inset-0 rounded-lg"
+          initial={{ boxShadow: 'inset 0 0 0 2px rgba(34,197,94,0.9), 0 0 24px rgba(34,197,94,0.5)', opacity: 1 }}
+          animate={{ opacity: 0 }}
+          transition={{ duration: 1.4, ease: 'easeOut' }}
+        />
+      )}
       <span className="mt-0.5 shrink-0">
         <StatusIcon status={issue.status} reducedMotion={reducedMotion} />
       </span>
@@ -50,8 +97,11 @@ function IssueRow({ issue, active, reducedMotion }: { issue: UiIssue; active: bo
             {STATUS_META[issue.status].label}
           </span>
         </span>
-        <span className="line-clamp-2 text-sm leading-snug">{issue.title}</span>
+        <span className={cn('line-clamp-2 text-sm leading-snug', issue.status === 'dismissed' && 'text-[var(--color-fg-muted)] line-through decoration-[var(--color-fg-muted)]/60')}>
+          {issue.title}
+        </span>
         {issue.location && <span className="truncate font-mono text-[11px] text-[var(--color-fg-muted)]">{issue.location}</span>}
+        {issue.proof && <ProofBadge proof={issue.proof} />}
         {(issue.url || issue.commit) && (
           <span className="flex flex-wrap items-center gap-3 pt-0.5 text-[11px]">
             {issue.url && (
