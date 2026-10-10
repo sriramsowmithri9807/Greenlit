@@ -40,6 +40,10 @@ A proposed diff is applied to a throwaway copy and run in a Nebius Token
 Factory sandbox. It's only committed if:
 
 - it applies cleanly and only touches paths inside the repo,
+- every test run it's judged on actually finished: a run that times out
+  (each is capped, `GREENLIT_TEST_TIMEOUT`, default 600 s), crashes, or ends the
+  process before pytest reports its results counts as a failure, never as
+  "no failures",
 - it doesn't edit test files: Greenlit fixes the code under test, and never
   weakens a test to make it pass,
 - for a failing-test issue, that test now passes, **and** the full suite has no
@@ -100,7 +104,8 @@ on, it doesn't publish. It also takes a local folder, for example
 
 Options: `--sequential` fixes one issue at a time in a single sandbox (the UI
 has the same switch); `GREENLIT_MAX_SANDBOXES` caps parallel sandboxes
-(default 4).
+(default 4); `GREENLIT_TEST_TIMEOUT` caps each test run in the sandbox
+(seconds, default 600).
 
 **Demo without credentials:** run the dashboard with `npm run dev` and open
 `http://localhost:5173/?mock=1` (or `?mock=partial`). This plays a scripted run
@@ -150,7 +155,7 @@ a real run has produced one.
 python -m pytest
 ```
 
-102 tests. The engine, agent and benchmark tests run real pytest (on Greenlit's own demo
+120 tests. The engine, agent and benchmark tests run real pytest (on Greenlit's own demo
 fixtures), apply real diffs, and push real commits into a local bare git repo
 that stands in for GitHub. Only the Nemotron calls and GitHub's REST API are
 scripted. `demo/` holds the deliberately broken fixtures and is excluded from
