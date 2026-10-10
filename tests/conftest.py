@@ -3,7 +3,9 @@
 `LocalSandbox` runs pytest for real, on the host, in the directory it's
 given. That's fine here because the only code it ever runs is Greenlit's
 own demo fixtures; in production every run goes to a Nebius sandbox. It
-drops the dependency-install part of a command, so tests never pip install.
+drops the dependency-install part of a command, so tests never pip install,
+and it emulates coreutils `timeout` (not available on every host, e.g.
+macOS): a timed-out command is killed and exits 124, as in the sandbox.
 
 `FakeGitHubAPI` records what the agent would have done on GitHub.
 
@@ -13,7 +15,10 @@ planner is shown, so tests can script "the model proposes this for that".
 from __future__ import annotations
 
 import difflib
+import os
+import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -27,6 +32,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = REPO_ROOT / "demo"
 
 _INSTALL_PREFIXES = ("export PIP", "pip install", "(pip install")
+_TIMEOUT_PREFIX = re.compile(r"timeout -k \d+ (\d+) ")
+TIMED_OUT = 124  # what coreutils `timeout` exits with
 
 
 class LocalSandbox:
@@ -37,8 +44,19 @@ class LocalSandbox:
         self.commands.append(command)
         kept = [part for part in command.split(" && ") if not part.startswith(_INSTALL_PREFIXES)]
         shell = " && ".join(kept).replace("python -m", f"{sys.executable} -m")
-        proc = subprocess.run(["bash", "-c", shell], cwd=repo_dir, capture_output=True, text=True, timeout=120)
-        return SandboxResult(stdout=proc.stdout, stderr=proc.stderr, exit_code=proc.returncode)
+        limits = [int(n) for n in _TIMEOUT_PREFIX.findall(shell)]
+        shell = _TIMEOUT_PREFIX.sub("", shell)
+        # Its own process group, so a timeout kills pytest too, not just bash.
+        proc = subprocess.Popen(
+            ["bash", "-c", shell], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=min(limits) if limits else 120)
+            return SandboxResult(stdout=stdout, stderr=stderr, exit_code=proc.returncode)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            stdout, stderr = proc.communicate()
+            return SandboxResult(stdout=stdout, stderr=stderr, exit_code=TIMED_OUT)
 
     def close(self) -> None:
         pass
